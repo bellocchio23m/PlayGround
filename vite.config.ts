@@ -10,5 +10,7 @@ export default defineConfig({
       output: { manualChunks: { three: ['three'] } }
     }
   },
-  server: { port: 3002 }
+  server: { port: 3002 },
+  // Allow the public tunnel hostname (DNS-rebinding protection would else 403 it).
+  preview: { allowedHosts: ['.trycloudflare.com'] },
 });
