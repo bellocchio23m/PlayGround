@@ -72,6 +72,16 @@ const checks = [
   ['src/ui/ui.ts', 'joy-zone'],   ['src/input/input.ts', 'getGamepads'],
   ['src/world/world.ts', 'losBlocked'], ['src/world/world.ts', 'patrolRoutes'],
   ['public/sw.js', 'caches'], ['public/manifest.webmanifest', 'SHADOWLINE'],
+  // phase 2 systems
+  ['src/debug/bench.ts', 'BenchRunner'], ['src/core/config.ts', 'PROFILES'],
+  ['src/player/player.ts', 'riposteT'], ['src/player/player.ts', 'landDip'],
+  ['src/core/game.ts', 'hitstop'], ['src/core/game.ts', 'applyProfile'],
+  ['src/core/game.ts', 'updateHidden'], ['src/core/game.ts', 'attachMarker'],
+  ['src/ai/enemy.ts', 'strafeDir'], ['src/ai/enemy.ts', 'searchT'],
+  ['src/ai/civilian.ts', 'scare'], ['src/world/world.ts', 'matLib'],
+  ['src/world/world.ts', 'cache-smoke'], ['src/save/save.ts', 'SLOT_COUNT'],
+  ['src/save/save.ts', 'BAK_KEY'], ['src/ui/ui.ts', 'setContext'],
+  ['src/ui/ui.ts', 'setLefty'], ['src/audio/audio.ts', 'setMood'],
 ];
 for (const [f, token] of checks) {
   let okF = false;

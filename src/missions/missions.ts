@@ -18,7 +18,7 @@ export const MISSIONS: MissionDef[] = [
   },
   {
     id: 'm2-lama', name: '2 — La Lama Silenziosa',
-    briefing: 'Un luogotenente dei Corvi pattuglia la piazza. Eliminalo senza allarme: avvicinati alle spalle, accovacciati, o cala dall\u2019alto.',
+    briefing: 'Un luogotenente dei Corvi pattuglia la piazza. Due vie: alle spalle tra i tavolini, oppure sali sulle casse a est e cala dall\u2019alto. I coltelli dai muri bassi funzionano, ma fanno rumore.',
     objectives: [
       { id: 'kill-lt', text: 'Assassina il Luogotenente (furtivo o in combattimento)', kind: 'assassinate', target: 'target', count: 1 },
       { id: 'escape-m2', text: 'Sparisci: allontanati dalla piazza', kind: 'escape', target: V(-14, 0, 20), radius: 6 },

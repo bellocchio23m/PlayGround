@@ -19,18 +19,49 @@ export class World {
   lamps: THREE.PointLight[] = [];
   bounds = new THREE.Box3(new THREE.Vector3(-46, 0, -46), new THREE.Vector3(46, 30, 46));
   private ray = new THREE.Raycaster();
+  /** PRODUCTION material library: flat-shaded, zero textures, 1 shader family.
+   *  TEMPORARY placeholders (to replace with skinned/textured assets later):
+   *  character rigs, window light planes, neon sign planes. */
+  matLib!: Record<string, THREE.MeshStandardMaterial>;
 
   constructor(private scene: THREE.Scene) {}
 
   build(): void {
+    this.materials();
     this.ground();
     this.lighting();
     this.buildings();
     this.alleyProps();
+    this.streetProps();
+    this.signs();
+    this.courtyard();
+    this.rooftopDetails();
+    this.dropPlatform();
+    this.caches();
     this.warehouse();
     this.plaza();
     this.patrols();
     this.scene.add(this.group);
+  }
+
+  /** distinguishable surfaces: asphalt, concrete, metal, wood, glass, brick */
+  private materials(): void {
+    const m = (color: number, rough = 0.9, metal = 0.05, emissive = 0): THREE.MeshStandardMaterial =>
+      new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal, emissive });
+    this.matLib = {
+      asphalt: m(0x14171d, 1),
+      concrete: m(0x3a414c, 0.95),
+      metal: m(0x4b5563, 0.45, 0.7),
+      rustMetal: m(0x5a4030, 0.7, 0.4),
+      wood: m(0x6b4f2e, 0.85),
+      crateWood: m(0x5b4632, 0.9),
+      brickA: m(0x3a2f2b, 0.95),
+      brickB: m(0x33302e, 0.95),
+      wallC: m(0x2e3138, 0.95),
+      tarp: m(0x274035, 0.8),
+      stone: m(0x39424e, 0.9),
+      glass: new THREE.MeshStandardMaterial({ color: 0x8fb4ff, roughness: 0.15, metalness: 0.8, emissive: 0x1a2733 }),
+    };
   }
 
   private mat(color: number, rough = 0.9, emissive = 0): THREE.MeshStandardMaterial {
@@ -152,7 +183,7 @@ export class World {
   }
 
   private alleyProps(): void {
-    const crate = this.mat(0x5b4632); const dump = this.mat(0x274035);
+    const crate = this.matLib.crateWood; const dump = this.matLib.tarp;
     const crates: Array<[number, number, number, number]> = [
       [-11, 0.5, -8, 1], [-11, 1.4, -8.2, 0.7], [-10, 0.4, -6.5, 0.8],
       [11, 0.5, 22, 1], [12.2, 0.4, 21, 0.8], [11.5, 1.3, 21.5, 0.7],
@@ -163,12 +194,12 @@ export class World {
     this.box(-12, 0.7, 12, 2.2, 1.4, 1.2, dump);
     this.box(12, 0.7, -12, 2.2, 1.4, 1.2, dump);
     // cover walls (crouch stealth)
-    const cover = this.mat(0x232b36);
+    const cover = this.matLib.concrete;
     this.box(-4, 0.6, -2, 3, 1.2, 0.4, cover);
     this.box(4, 0.6, 14, 3, 1.2, 0.4, cover);
     this.box(0, 0.6, -18, 4, 1.2, 0.4, cover);
     // scaffolding for climb route on east tall building
-    const scaf = this.mat(0x7a6a4a);
+    const scaf = this.matLib.wood;
     this.box(12.4, 2, 14, 1.2, 4, 1.2, scaf);
     this.box(12.4, 5, 14, 1.2, 2.4, 1.2, scaf);
     this.ledges.push({
@@ -205,11 +236,127 @@ export class World {
 
   private plaza(): void {
     // fountain cover in south plaza + banners
-    const stone = this.mat(0x39424e);
+    const stone = this.matLib.stone;
     this.box(0, 0.4, 22, 4, 0.8, 4, stone);
     const pole = this.mat(0x39414f);
     this.box(-6, 3, 22, 0.2, 6, 0.2, pole, false);
     this.box(6, 3, 22, 0.2, 6, 0.2, pole, false);
+  }
+
+  /** street furniture: barriers, bollards, manholes, hydrant — orientation + cover */
+  private streetProps(): void {
+    const M = this.matLib;
+    // traffic barriers (low cover along roads)
+    for (const [x, z, rot] of [[-5, 2, 0], [5, -6, 0], [-5, -14, 0], [5, 24, 0]] as Array<[number, number, number]>) {
+      void rot;
+      this.box(x, 0.5, z, 2.4, 1.0, 0.35, M.concrete);
+      this.box(x, 1.05, z, 2.4, 0.12, 0.4, M.rustMetal, false);
+    }
+    // bollards (wayfinding dots, no collision cost issue: small, few)
+    for (const x of [-7, -5, 5, 7]) {
+      this.box(x, 0.45, 30, 0.3, 0.9, 0.3, M.metal);
+      this.box(x, 0.45, -16, 0.3, 0.9, 0.3, M.metal);
+    }
+    // manholes (flat, atmosphere only)
+    const mh = M.rustMetal;
+    for (const [x, z] of [[-2, 4], [3, -12], [-3, 18]] as Array<[number, number]>) {
+      const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.7, 0.04, 12), mh);
+      disc.position.set(x, 0.04, z);
+      this.group.add(disc);
+    }
+    // hydrant (landmark near plaza)
+    this.box(-7.5, 0.5, 24, 0.5, 1.0, 0.5, M.rustMetal);
+  }
+
+  /** neon signs: emissive planes (TEMPORARY placeholder for texture-atlas signs).
+   *  Each is a gameplay landmark: colors orient the player at night. */
+  private signs(): void {
+    const sign = (x: number, y: number, z: number, w: number, h: number, color: number, ry: number): void => {
+      const s = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
+        new THREE.MeshBasicMaterial({ color }));
+      s.position.set(x, y, z); s.rotation.y = ry;
+      this.group.add(s);
+      const back = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, h + 0.2, 0.12), this.matLib.metal);
+      back.position.set(x, y, z); back.rotation.y = ry;
+      back.translateZ(-0.08);
+      this.group.add(back);
+    };
+    sign(-13.9, 3.4, -14, 3.2, 0.9, 0xff2e88, Math.PI / 2);   // west pink "bar" — alley route marker
+    sign(13.1, 4.2, 0, 3.6, 1.0, 0x27e0ff, -Math.PI / 2);      // east cyan — climb route marker
+    sign(0, 5.4, -24.9, 4.2, 1.0, 0xffb45e, 0);               // north amber — villa/warehouse heading
+    sign(-8, 2.6, 27.9, 2.6, 0.8, 0x7dff9e, Math.PI);          // south green — extraction heading
+  }
+
+  /** courtyard life: tables, benches, clotheslines (cover + atmosphere) */
+  private courtyard(): void {
+    const M = this.matLib;
+    // café tables + benches near fountain
+    for (const [x, z] of [[-4, 24], [4, 20]] as Array<[number, number]>) {
+      this.box(x, 0.45, z, 1.1, 0.1, 1.1, M.wood);
+      this.box(x, 0.2, z, 0.14, 0.4, 0.14, M.metal);
+      this.box(x - 1.1, 0.25, z, 1.2, 0.12, 0.4, M.wood);
+      this.box(x + 1.1, 0.25, z + 0.4, 1.2, 0.12, 0.4, M.wood);
+    }
+    // clotheslines between poles (visual rhythm, no collision)
+    const line = new THREE.MeshBasicMaterial({ color: 0x8fa3c1 });
+    for (const [x1, z1, x2, z2] of [[-8, 18, -2, 18], [2, 26, 8, 26]] as Array<[number, number, number, number]>) {
+      const len = Math.hypot(x2 - x1, z2 - z1);
+      const rope = new THREE.Mesh(new THREE.BoxGeometry(len, 0.03, 0.03), line);
+      rope.position.set((x1 + x2) / 2, 3.2, (z1 + z2) / 2);
+      rope.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+      this.group.add(rope);
+      for (let i = 1; i <= 3; i++) {
+        const t = i / 4;
+        const shirt = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.6),
+          new THREE.MeshBasicMaterial({ color: [0xc96a6a, 0x6a8fc9, 0x9fc96a][i - 1], side: THREE.DoubleSide }));
+        shirt.position.set(x1 + (x2 - x1) * t, 2.85, z1 + (z2 - z1) * t);
+        shirt.rotation.y = rope.rotation.y;
+        this.group.add(shirt);
+      }
+    }
+  }
+
+  /** rooftop readability: antennas, tank, vents — parkour landmarks */
+  private rooftopDetails(): void {
+    const M = this.matLib;
+    // antenna on east tall roof (highest point = orientation landmark)
+    this.box(20, 14.6, 18, 0.25, 3.2, 0.25, M.metal);
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0xff3b3b }));
+    tip.position.set(20, 16.3, 18); this.group.add(tip);
+    // water tank on north villa roof
+    const tank = new THREE.Mesh(new THREE.CylinderGeometry(1.3, 1.3, 2.2, 10), M.wood);
+    tank.position.set(-4, 8.9, -30); this.group.add(tank);
+    this.colliders.push(new THREE.Box3(new THREE.Vector3(-5.3, 7.8, -31.3), new THREE.Vector3(-2.7, 10, -28.7)));
+    // vents on west roofs (stepping + silhouette)
+    this.box(-20, 7.2, 2, 1.0, 1.4, 1.0, M.metal);
+    this.box(-20, 4.9, -14, 1.0, 1.4, 1.0, M.metal);
+  }
+
+  /** m2 second approach: crate stair -> drop-kill platform over the plaza patrol */
+  private dropPlatform(): void {
+    const M = this.matLib;
+    this.box(7.5, 0.5, 20, 1.4, 1.0, 1.4, M.crateWood);
+    this.box(7.5, 1.5, 19.2, 1.2, 1.0, 1.2, M.crateWood);
+    this.box(7.5, 2.2, 19.6, 1.8, 0.4, 1.8, M.wood);
+    this.ledges.push({
+      min: new THREE.Vector3(6.6, 0, 18.7), max: new THREE.Vector3(8.4, 2.4, 20.5),
+      topY: 2.4, kind: 'vault',
+    });
+  }
+
+  /** exploration rewards: smoke / knife caches + intel (+XP). Real gameplay value. */
+  private caches(): void {
+    const mk = (id: string, label: string, x: number, y: number, z: number, color: number): void => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.5, 0.5),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.3, emissive: color, emissiveIntensity: 0.35 }));
+      mesh.position.set(x, y, z);
+      this.group.add(mesh);
+      this.interactables.push({ id, pos: new THREE.Vector3(x, y, z), radius: 3, label, kind: 'cache', taken: false, mesh });
+    };
+    mk('cache-smoke', 'Fumogeni +2', -20, 7.3, 2, 0x9aa7bd);   // west roof W2
+    mk('cache-knife', 'Coltelli +2', 12.5, 0.6, -12, 0xc9a227); // east alley
+    mk('intel', 'Informazioni (+60 XP)', 0, 1.2, 22, 0x7dff9e); // fountain
   }
 
   private patrols(): void {
@@ -270,10 +417,12 @@ export class World {
     return hit;
   }
 
-  /** line of sight blocked? uses raycaster against collider boxes (cheap: manual slab test) */
-  losBlocked(ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean {
+  /** line of sight blocked? uses raycaster against collider boxes (cheap: manual slab test).
+   *  maxTopY: boxes entirely below this height are ignored (leaning over cover). */
+  losBlocked(ax: number, ay: number, az: number, bx: number, by: number, bz: number, maxTopY = Infinity): boolean {
     for (let i = 0; i < this.colliders.length; i++) {
       const c = this.colliders[i];
+      if (c.max.y < maxTopY) continue;
       if (this.segHitsBox(ax, ay, az, bx, by, bz, c)) return true;
     }
     return false;
