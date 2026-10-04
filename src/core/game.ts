@@ -12,7 +12,8 @@ import { Player } from '../player/player';
 import { ThirdPersonCamera } from '../camera/tpcamera';
 import { InputManager } from '../input/input';
 import { Enemy, EnemyKind } from '../ai/enemy';
-import { Civilian, civilianSpots } from '../ai/civilian';
+import { Civilian, civilianSpots, SAFE_ZONES } from '../ai/civilian';
+import { AdaptiveQuality } from '../debug/adaptive';
 import { CombatSystem } from '../combat/combat';
 import { canAssassinate } from '../stealth/perception';
 import { AudioEngine } from '../audio/audio';
@@ -53,6 +54,8 @@ export class Game {
   particleMul = 0.8;
   botMode: 'off' | 'circle' | 'combat' | 'traverse' = 'off';
   bench: BenchRunner | null = null;
+  adaptive = new AdaptiveQuality();
+  lureFxT = 0;
   private botT = 0; private botAtkT = 0;
   private hudT = 0; private mapT = 0; private objCache = '';
   private lastCheckpointSave = -99;
@@ -80,7 +83,7 @@ export class Game {
     this.world = new World(this.scene);
     this.world.build();
     this.player = new Player({
-      noise: (n) => this.noises.push(n),
+      noise: (n) => this.pushNoise(n),
       landed: () => undefined,
       died: () => this.onDeath(),
     }, this.audio);
@@ -99,6 +102,9 @@ export class Game {
     this.input.invertY = this.save.data.settings.invertY;
     this.ui.setLefty(this.save.data.settings.lefty);
     this.ui.setUiScale(this.save.data.settings.uiScale);
+    this.ui.setLayoutPreset(this.save.data.settings.layout);
+    this.ui.setMinimapZoom(this.save.data.settings.minimapZoom);
+    this.ui.autoLayout();
     this.applySaveToState();
     this.buildSmokePool();
     this.buildBurstPool();
@@ -107,8 +113,18 @@ export class Game {
     window.addEventListener('resize', () => {
       this.renderer.setSize(window.innerWidth, window.innerHeight);
       this.cam.resize(window.innerWidth, window.innerHeight);
+      this.ui.autoLayout();
     });
-    document.addEventListener('visibilitychange', () => { if (document.hidden && this.screen === 'playing') this.pause(); });
+    // PWA update notify: new SW version available
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        this.ui.toast('Aggiornamento installato — ricarica per la nuova versione', 5000);
+      });
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && this.screen === 'playing') this.pause();
+      if (document.hidden) this.audio.suspend(); else this.audio.resume();
+    });
     // keyboard shortcuts for panels/debug/bench
     window.addEventListener('keydown', (e) => {
       if (e.code === 'F3') { this.debug = !this.debug; if (this.debugEl) this.debugEl.style.display = this.debug ? 'block' : 'none'; }
@@ -152,7 +168,28 @@ export class Game {
     this.audio.setVolume(d.settings.volume);
   }
 
-  // ---------- A55 performance profiles ----------
+  /** central noise bus: generators mask player noise within 9m (distraction/cover play) */
+  private pushNoise(n: NoiseEvent): void {
+    const gens = (this.world as unknown as { generators?: THREE.Vector3[] }).generators;
+    if (gens) {
+      for (const g of gens) {
+        const d = Math.hypot(g.x - n.x, g.z - n.z);
+        if (d < 9) { n.radius *= 0.5; n.loudness *= 0.5; break; }
+      }
+    }
+    this.noises.push(n);
+  }
+
+  /** light level at a position: lamps on = 1 falling off, darkness = 0.35 (stealth matters) */
+  playerLight(x: number, z: number): number {
+    let l = 0.35;
+    for (const lamp of this.world.lamps) {
+      if (!lamp.visible) continue;
+      const d = Math.hypot(lamp.position.x - x, lamp.position.z - z);
+      if (d < 24) l = Math.max(l, 1 - (d / 24) * 0.65);
+    }
+    return Math.min(1, l);
+  }
   applyProfile(q: 'low' | 'med' | 'high'): void {
     const p = PROFILES[q] ?? PROFILES['med'];
     this.profile = p;
@@ -279,7 +316,7 @@ export class Game {
     // mission 5 starts with alarm
     if (def.id === 'm5-fuga') { this.alarmT = 45; this.alertAll(); this.ui.toast('⚠ ALLARME! Fuggi!'); }
     else this.alarmT = 0;
-    this.audio.ensure(); this.audio.startMusic();
+    this.audio.ensure(); this.audio.startMusic(); this.audio.startAmbience();
     this.screen = 'playing';
     this.ui.hideMenu();
     this.ui.show('pause', false); this.ui.show('over', false); this.ui.show('complete', false);
@@ -291,28 +328,89 @@ export class Game {
 
   private spawnEnemiesForMission(missionId: string): void {
     const routes = this.world.patrolRoutes;
-    const mk = (kind: EnemyKind, routeIdx: number): void => {
+    const mk = (kind: EnemyKind, routeIdx: number, tagTarget = false): void => {
       const e = new Enemy(kind, routes[routeIdx % routes.length]);
       // face along patrol route (away from spawn approaches where possible)
       const r = routes[routeIdx % routes.length];
       if (r.length > 1) e.yaw = Math.atan2(r[1].x - r[0].x, r[1].z - r[0].z) + Math.PI;
+      if (tagTarget) (e as unknown as Record<string, unknown>)['isTarget'] = true;
       this.attachMarker(e);
       this.enemies.push(e); this.scene.add(e.rig.group);
     };
-    mk('guard', 0); mk('guard', 1); mk('guard', 2);
+    // data-driven spawns (phase-3 missions) with legacy fallback
+    const def = MISSIONS.find((m) => m.id === missionId);
+    const table = (def as unknown as { spawns?: Array<{ kind: EnemyKind; route: number }> } | undefined)?.spawns;
+    if (table && table.length) {
+      table.forEach((s, i) => mk(s.kind, s.route, i === 0));
+    } else {
+      mk('guard', 0); mk('guard', 1); mk('guard', 2);
+    }
     if (missionId === 'm2-lama') {
       const lt = new Enemy('elite', [new THREE.Vector3(-4, 0, 16), new THREE.Vector3(4, 0, 20), new THREE.Vector3(-4, 0, 24)]);
       this.attachMarker(lt);
-      (lt as unknown as { tag?: string }).tag = 'target';
       (lt as unknown as Record<string, unknown>)['isTarget'] = true;
       this.enemies.push(lt); this.scene.add(lt.rig.group);
-    } else {
+    } else if (!table?.length) {
       mk('guard', 4);
     }
     if (missionId === 'm3-verticale' || missionId === 'm4-sigillo') { mk('elite', 3); mk('guard', 4); }
     if (missionId === 'm5-fuga') { mk('elite', 0); mk('elite', 1); mk('captain', 4); }
+    if (missionId === 'm8-corvo') this.setupBoss();
+    // reset lamps to profile (missions must not inherit sabotage), then blackout flag
+    this.world.lamps.forEach((l, i) => { l.visible = i < this.profile.lampCount; });
+    // apply blackout world-flag (m6 consequence): plaza lamps stay off
+    if (this.save.data.worldFlags['blackout-plaza']) this.applyBlackout();
     // place rooftop guard at its roof height
     for (const e of this.enemies) e.pos.y = this.world.groundHeight(e.pos.x, e.pos.z);
+  }
+
+  /** m8 boss encounter: Il Corvo — captain with 2 phases (enrage at 50% + summons). */
+  private bossEnraged = false;
+  private setupBoss(): void {
+    this.bossEnraged = false;
+    const boss = new Enemy('captain', this.world.patrolRoutes[4] ?? [new THREE.Vector3(0, 0, 20)]);
+    (boss as unknown as Record<string, unknown>)['isBoss'] = true;
+    (boss as unknown as Record<string, unknown>)['isTarget'] = true;
+    this.attachMarker(boss);
+    this.enemies.push(boss); this.scene.add(boss.rig.group);
+    this.ui.toast('IL CORVO ti aspetta nella piazza. Stealth o acciaio — scegli.', 4200);
+    this.audio.sting('combat');
+  }
+
+  private tickBoss(dt: number): void {
+    void dt;
+    const boss = this.enemies.find((e) => (e as unknown as { isBoss?: boolean }).isBoss && !e.dead);
+    if (!boss || this.bossEnraged) return;
+    if (boss.hp < boss.maxHp * 0.5) {
+      this.bossEnraged = true;
+      // phase 2: no more attack cooldown (relentless) + mass callout
+      boss.atkCD = -999;
+      for (const e of this.enemies) {
+        if (e === boss || e.dead) continue;
+        e.investigate.copy(this.player.pos);
+        e.suspicion = 100;
+        e.state = 'COMBAT'; e.lastKnown.copy(this.player.pos); e.lastKnownT = this.time;
+      }
+      this.audio.bark('alert'); this.audio.sting('combat');
+      this.ui.toast('IL CORVO si infuria! Fase 2 — arrivano i rinforzi!');
+      this.ui.killfeed('BOSS: fase 2');
+      this.cam.addShake(0.5);
+      let summoned = 0;
+      for (let i = 0; i < 2 && summoned < 2; i++) {
+        const e = new Enemy('guard', [boss.pos.clone(), new THREE.Vector3(boss.pos.x + 6, 0, boss.pos.z + 6)]);
+        e.state = 'COMBAT'; e.lastKnown.copy(this.player.pos); e.lastKnownT = this.time;
+        this.attachMarker(e);
+        this.enemies.push(e); this.scene.add(e.rig.group);
+        summoned++;
+      }
+    }
+  }
+
+  private applyBlackout(): void {
+    // plaza lamps (near 0,22) stay dark — m6 consequence
+    this.world.lamps.forEach((l) => {
+      if (Math.hypot(l.position.x - 0, l.position.z - 22) < 24) l.visible = false;
+    });
   }
 
   private spawnCivilians(): void {
@@ -320,10 +418,17 @@ export class Game {
     this.civilians = [];
     if (this.mission?.def.id === 'm5-fuga') return; // streets empty during alarm
     const spots = civilianSpots();
-    const n = this.profile.civilians ? 4 : 0;
+    const archs = ['vendor', 'walker', 'sweeper', 'courier', 'walker', 'sweeper'] as const;
+    const n = this.profile.civilians ? (this.mission?.def.id === 'm8-corvo' ? 2 : 6) : 0;
     for (let i = 0; i < n; i++) {
-      const c = new Civilian(spots, i);
+      const c = new Civilian(spots, i, archs[i % archs.length]);
       c.pos.y = this.world.groundHeight(c.pos.x, c.pos.z);
+      // corpse scream -> loud noise that guards investigate (systemic stealth)
+      c.onScream = (x, z) => {
+        this.pushNoise({ x, y: 0, z, radius: 24, loudness: 1.5, kind: 'scream', t: this.time });
+        this.ui.killfeed('Un civile urla!');
+        this.audio.sting('combat');
+      };
       this.civilians.push(c); this.scene.add(c.group);
     }
     this.applyNpcVisibility();
@@ -351,6 +456,7 @@ export class Game {
 
   private onDeath(): void {
     if (this.screen !== 'playing') return;
+    this.save.saveDie();
     this.screen = 'over';
     this.ui.showHud(false);
     this.ui.show('over', true);
@@ -361,7 +467,8 @@ export class Game {
   private completeMission(): void {
     const rt = this.mission;
     rt.done = true;
-    const { levels } = addXp(this.xp, rt.def.rewardXp);
+    const ghostBonus = rt.ghost ? ((rt.def as unknown as { ghostBonusXp?: number }).ghostBonusXp ?? 0) : 0;
+    const { levels } = addXp(this.xp, rt.def.rewardXp + ghostBonus);
     if (rt.def.rewardTools?.smoke) this.smoke += rt.def.rewardTools.smoke;
     if (rt.def.rewardTools?.knives) this.knives += rt.def.rewardTools.knives;
     const d = this.save.data;
@@ -370,13 +477,22 @@ export class Game {
     d.xp = this.xp.xp + (this.xp.level - 1) * 140;
     d.upgrades = { ...this.xp.upgrades };
     d.inventory.smoke = this.smoke; d.inventory.knives = this.knives;
+    d.inventory.lure = Math.min(3, (d.inventory.lure ?? 1) + 1); // restock lure
     d.bestGhost[rt.def.id] = (d.bestGhost[rt.def.id] ?? true) && rt.ghost;
-    this.save.save();
+    // world-state consequences (phase-3 mini-campaign persistence)
+    const flag = (rt.def as unknown as { setFlag?: string }).setFlag;
+    if (flag) d.worldFlags[flag] = true;
+    if (rt.def.id === 'm5-fuga' && !d.unlockedSpecial) {
+      d.unlockedSpecial = true;
+      this.ui.toast('FALCE LUNARE appresa! (R / FALCE)', 3500);
+    }
+    if (rt.ghost) this.save.bumpStat('ghosts');
+    this.save.saveMissionComplete(rt.def.id, rt.ghost, rt.def.rewardXp + ghostBonus);
     this.screen = 'complete';
     this.ui.showHud(false);
     this.ui.show('complete', true);
     const el = this.ui.root.querySelector('#complete-body');
-    if (el) el.innerHTML = `+${rt.def.rewardXp} XP · Livello ${this.xp.level}${levels ? ` (⬆ +${levels} punti!)` : ''}<br>${rt.ghost ? '👻 FANTASMA — mai individuato!' : ''}<br>Tempo: ${rt.time.toFixed(0)}s`;
+    if (el) el.innerHTML = `+${rt.def.rewardXp + ghostBonus} XP · Livello ${this.xp.level}${levels ? ` (⬆ +${levels} punti!)` : ''}<br>${rt.ghost ? '👻 FANTASMA — mai individuato!' : ''}<br>Tempo: ${rt.time.toFixed(0)}s`;
     this.audio.stopMusic();
   }
 
@@ -465,6 +581,8 @@ export class Game {
         <button data-act="set-lefty" style="pointer-events:auto;background:#1c2940;color:#fff;border:1px solid #3a4a63;border-radius:8px;padding:6px 10px">Mancini: ${s.lefty ? 'ON' : 'OFF'}</button></div>
         <div><button data-act="set-minimap" style="pointer-events:auto;background:#1c2940;color:#fff;border:1px solid #3a4a63;border-radius:8px;padding:6px 10px">Minimappa: ${s.minimap ? 'ON' : 'OFF'}</button>
         <button data-act="set-vib" style="pointer-events:auto;background:#1c2940;color:#fff;border:1px solid #3a4a63;border-radius:8px;padding:6px 10px">Vibrazione: ${this.vibOn ? 'ON' : 'OFF'}</button></div>
+        <div>Layout pulsanti: ${(['default', 'compact', 'large'] as const).map((l) => `<button data-act="set-layout-${l}" style="pointer-events:auto;margin-right:6px;background:${s.layout === l ? '#e63946' : '#1c2940'};color:#fff;border:1px solid #3a4a63;border-radius:8px;padding:6px 10px">${l}</button>`).join('')}</div>
+        <div>Zoom minimappa: ${([1, 2, 3] as const).map((z) => `<button data-act="set-zoom-${z}" style="pointer-events:auto;margin-right:6px;background:${s.minimapZoom === z ? '#e63946' : '#1c2940'};color:#fff;border:1px solid #3a4a63;border-radius:8px;padding:6px 10px">×${z}</button>`).join('')}</div>
         <label>Dimensione UI: <input id="set-uis" type="range" min="85" max="130" value="${s.uiScale * 100}" style="pointer-events:auto"></label>
         <label>Sensibilità camera: <input id="set-sens" type="range" min="30" max="200" value="${this.input.sens * 100}" style="pointer-events:auto"></label>
         <div><button data-act="set-wipe" style="pointer-events:auto;background:#3a0f16;color:#ffb0b0;border:1px solid #e63946;border-radius:8px;padding:6px 10px">Cancella salvataggio (slot ${this.save.slotIndex + 1})</button></div>
@@ -486,6 +604,14 @@ export class Game {
     if (a === 'set-lefty') { this.save.data.settings.lefty = !this.save.data.settings.lefty; this.ui.setLefty(this.save.data.settings.lefty); this.save.save(); this.renderSettings(); }
     if (a === 'set-minimap') { this.save.data.settings.minimap = !this.save.data.settings.minimap; this.minimapAllowed = this.save.data.settings.minimap && this.profile.minimap; const mm = this.ui.els['minimap']; if (mm) mm.style.display = this.minimapAllowed ? 'block' : 'none'; this.save.save(); this.renderSettings(); }
     if (a === 'set-vib') { this.vibOn = !this.vibOn; this.vibrate(30); this.renderSettings(); }
+    if (a.startsWith('set-layout-')) {
+      const l = a.slice(11) as 'default' | 'compact' | 'large';
+      this.save.data.settings.layout = l; this.ui.setLayoutPreset(l); this.save.save(); this.renderSettings();
+    }
+    if (a.startsWith('set-zoom-')) {
+      const z = parseInt(a.slice(9), 10) as 1 | 2 | 3;
+      this.save.data.settings.minimapZoom = z; this.ui.setMinimapZoom(z); this.save.save(); this.renderSettings();
+    }
     if (a.startsWith('set-q-')) {
       const q = a.slice(6) as 'low' | 'med' | 'high';
       this.save.data.settings.quality = q; this.save.save(); this.renderSettings();
@@ -692,6 +818,7 @@ export class Game {
     const t = this.nearestAssassinTarget();
     if (!t) { this.ui.toast('Nessun bersaglio furtivo — alle spalle, accovacciato o dall\u2019alto'); return; }
     t.assassinate(this.audio);
+    this.save.bumpStat('kills');
     this.burst(t.pos, 0x7dff9e, 16);
     this.ui.killfeed('☠ Eliminazione furtiva');
     this.combatFxKill(t);
@@ -730,13 +857,35 @@ export class Game {
     if (w.mesh) w.mesh.visible = false;
     this.audio.pickup();
     if (it.id === 'relic') this.save.data.inventory.relic = true;
-    if (it.id === 'documento' || it.id === 'doc') this.save.data.inventory.doc = true;
+    if (it.id === 'documento' || it.id === 'doc' || it.id === 'doc-villa') this.save.data.inventory.doc = true;
     // exploration caches: real gameplay value, capped
-    if (it.id === 'cache-smoke') { this.smoke = Math.min(6, this.smoke + 2); this.ui.toast('Fumogeni +2'); }
-    if (it.id === 'cache-knife') { this.knives = Math.min(8, this.knives + 2); this.ui.toast('Coltelli +2'); }
-    if (it.id === 'intel') {
+    if (it.id === 'cache-smoke' || it.id === 'cache-garden') { this.smoke = Math.min(6, this.smoke + 2); this.ui.toast('Fumogeni +2'); }
+    if (it.id === 'cache-knife' || it.id === 'cache-attic') { this.knives = Math.min(8, this.knives + 2); this.ui.toast('Coltelli +2'); }
+    if (it.id === 'intel' || it.id === 'cache-canal') {
       const { levels } = addXp(this.xp, 60);
       this.ui.toast(levels > 0 ? `Intel +60 XP — punto abilità guadagnato!` : 'Intel +60 XP');
+    }
+    // breaker boxes: kill nearby lamps (darkness = stealth) + loud distraction
+    if (w.kind === 'breaker') {
+      let cut = 0;
+      for (const l of this.world.lamps) {
+        if (l.visible && Math.hypot(l.position.x - w.pos.x, l.position.z - w.pos.z) < 22) { l.visible = false; cut++; }
+      }
+      this.pushNoise({ x: w.pos.x, y: 1, z: w.pos.z, radius: 24, loudness: 1.3, kind: 'breaker', t: this.time });
+      this.audio.sting('suspicious');
+      this.ui.toast(`Quadro elettrico sabotato — ${cut} lampioni spenti`);
+    }
+    // unlockable shortcuts: add the runtime traversal ledge from world data
+    if (w.kind === 'shortcut') {
+      const gates = (this.world as unknown as { shortcutGates?: Array<{ id: string; from: THREE.Vector3; to: THREE.Vector3; topY: number }> }).shortcutGates ?? [];
+      const gate = gates.find((g) => g.id === it.id);
+      if (gate) {
+        const min = new THREE.Vector3(Math.min(gate.from.x, gate.to.x) - 0.7, 0, Math.min(gate.from.z, gate.to.z) - 0.7);
+        const max = new THREE.Vector3(Math.max(gate.from.x, gate.to.x) + 0.7, gate.topY, Math.max(gate.from.z, gate.to.z) + 0.7);
+        this.world.ledges.push({ min, max, topY: gate.topY, kind: gate.topY > 5 ? 'climb' : 'vault' });
+        this.ui.toast('Scorciatoia sbloccata!');
+        this.audio.pickup();
+      }
     }
     this.ui.killfeed(`✔ ${it.label}`);
     const o = currentObjective(this.mission);
@@ -748,6 +897,36 @@ export class Game {
       }
     }
     this.save.save();
+  }
+
+  private throwLure(): void {
+    if (this.save.data.inventory.lure <= 0) { this.ui.toast('Nessuna esca'); return; }
+    const p = this.player;
+    // throw toward facing: 8m ahead, clamped to ground
+    const tx = p.pos.x + -Math.sin(p.yaw) * 8;
+    const tz = p.pos.z + -Math.cos(p.yaw) * 8;
+    const gy = this.world.groundHeight(tx, tz);
+    this.save.data.inventory.lure--;
+    this.audio.swoosh();
+    this.burst(new THREE.Vector3(tx, gy + 0.5, tz), 0x9aa7bd, 8);
+    // guards investigate the clatter; civilians glance
+    this.pushNoise({ x: tx, y: gy, z: tz, radius: 20, loudness: 1.1, kind: 'lure', t: this.time });
+    this.ui.toast('Esca lanciata — li hai distratti');
+    this.save.save();
+  }
+
+  private trySpecial(): void {
+    const p = this.player as unknown as { specialUnlocked?: boolean };
+    if (!this.save.data.unlockedSpecial && !p.specialUnlocked) { this.ui.toast('Falce Lunare: completa la missione 5'); return; }
+    p.specialUnlocked = true;
+    const res = this.combat.trySpecial(this.player, this.enemies, this.cam);
+    if (res.hits > 0) {
+      this.hitstop = Math.max(this.hitstop, 0.08);
+      this.pushNoise({ x: this.player.pos.x, y: this.player.pos.y, z: this.player.pos.z, radius: 22, loudness: 1.3, kind: 'fight', t: this.time });
+      if (res.kills > 0) { this.ui.killfeed('FALCE LUNARE!'); this.mission.progress += res.kills; this.checkAssassinateObjective(); }
+    } else {
+      this.ui.toast(this.combat.isSpecialReady(this.player) ? 'Nessun bersaglio a portata' : `Falce in ricarica (${this.combat.getSpecialCooldown().toFixed(0)}s)`);
+    }
   }
 
   private throwSmoke(): void {
@@ -816,6 +995,7 @@ export class Game {
 
   private tick(dt: number): void {
     this.time += dt;
+    this.save.addPlayTime(dt);
     const inp = this.input;
     inp.poll();
     if (this.bench?.active) { /* bot drives input below */ }
@@ -833,7 +1013,7 @@ export class Game {
 
     // fixed-Hz brain ticks per enemy (profile-driven) + AI cost measurement
     const now = this.time;
-    const prefs = { pos: this.player.pos, crouch: this.player.crouch, sprinting: this.player.sprinting, dead: this.player.dead, elevated: this.player.elevated, moving: this.player.moving, yaw: this.player.yaw, attackT: this.player.attackT, hidden: this.hidden };
+    const prefs = { pos: this.player.pos, crouch: this.player.crouch, sprinting: this.player.sprinting, dead: this.player.dead, elevated: this.player.elevated, moving: this.player.moving, yaw: this.player.yaw, attackT: this.player.attackT, hidden: this.hidden, light: this.playerLight(this.player.pos.x, this.player.pos.z) };
     const aiT0 = performance.now();
     for (const e of this.enemies) {
       e.acc += dt;
@@ -841,10 +1021,13 @@ export class Game {
       e.acc = Math.min(e.acc - this.aiInterval, this.aiInterval * 2); // no spiral of death
       e.tick(this.aiInterval, now, prefs, this.world, this.audio,
         (en) => this.onSpotted(en),
-        () => this.ui.toast('…ti hanno perso di vista. Nasconditi!'));
-      // corpse discovery
+        () => { this.ui.toast('…ti hanno perso di vista. Nasconditi!'); this.audio.sting('lost'); });
+      // corpse discovery (guards investigate; civilians scream)
       for (const c of this.enemies) {
-        if (c.dead) e.seeCorpse(c.pos.x, c.pos.z);
+        if (c.dead) {
+          e.seeCorpse(c.pos.x, c.pos.z);
+          for (const civ of this.civilians) civ.seeCorpse(c.pos.x, c.pos.z);
+        }
       }
     }
     const aiCost = performance.now() - aiT0;
@@ -865,12 +1048,13 @@ export class Game {
     this.noises.length = 0;
 
     // combat
+    this.combat.tick(dt);
     const res = this.combat.updatePlayerAttack(this.player, this.enemies, this.cam);
     if (res.hits > 0) {
       this.hitstop = Math.max(this.hitstop, res.kills > 0 ? 0.09 : 0.045);
       this.noises.push({ x: this.player.pos.x, y: this.player.pos.y, z: this.player.pos.z, radius: 20, loudness: 1.2, kind: 'fight', t: now });
       for (const c of this.civilians) c.scare(this.player.pos.x, this.player.pos.z, true);
-      if (res.kills > 0) { this.ui.killfeed(res.kills > 1 ? `⚔ ${res.kills} nemici abbattuti!` : '⚔ Nemico abbattuto'); this.mission.progress += res.kills; this.checkAssassinateObjective(); }
+      if (res.kills > 0) { this.ui.killfeed(res.kills > 1 ? `⚔ ${res.kills} nemici abbattuti!` : '⚔ Nemico abbattuto'); this.mission.progress += res.kills; this.save.bumpStat('kills', res.kills); this.checkAssassinateObjective(); }
     }
     this.combat.updateEnemyAttacks(this.player, this.enemies, () => {
       this.ui.damageFlash(0.7); this.cam.addShake(0.3); this.vibrate(40);
@@ -882,6 +1066,8 @@ export class Game {
     if (inp.pressed.interact) this.tryInteract();
     if (inp.pressed.smoke) this.throwSmoke();
     if (inp.pressed.knife) this.throwKnife();
+    if (inp.pressed.lure) this.throwLure();
+    if (inp.pressed.special) this.trySpecial();
 
     // interact prompt
     const inter = this.nearestInteract();
@@ -902,6 +1088,8 @@ export class Game {
 
     // visuals per frame
     for (const e of this.enemies) e.syncVisual(dt);
+    this.tickBoss(dt);
+    this.resolveRangerKnives();
     this.updateMarkers();
     this.updateHidden(dt);
 
@@ -918,6 +1106,18 @@ export class Game {
         `Liv ${this.xp.level} · +${this.mission.def.rewardXp} XP alla fine`, this.smoke, this.knives);
       this.ui.setContext(this.assassPrompt !== null, this.nearestInteract() !== null, this.smoke, this.knives);
       this.updateThreat();
+      // stealth tier HUD: highest enemy suspicion tier
+      let tier = 0; let tlabel = '';
+      for (const e of this.enemies) {
+        if (e.dead) continue;
+        const t = (e as unknown as { suspicionTier?: number }).suspicionTier ?? (e.suspicion > 69 ? 2 : e.suspicion > 34 ? 1 : 0);
+        if (t > tier) { tier = t; tlabel = t === 2 ? 'ALLARME' : 'sospetto'; }
+      }
+      this.ui.setStealthTier(tier as 0 | 1 | 2, tlabel);
+      // mission tracker with survive timer
+      const oo = currentObjective(this.mission);
+      const timer = oo?.kind === 'survive' ? `⏱ ${Math.max(0, (oo.count ?? 45) - this.mission.time).toFixed(0)}s` : undefined;
+      this.ui.setTracker(this.mission.def.name, this.mission.def.objectives.map((x) => x.text), this.mission.objIndex, timer);
     }
     this.ui.updateVignette(dt, this.player.hp, this.player.hpMax);
     if (this.mapT >= 0.25 && this.minimapAllowed) { this.mapT = 0; this.drawMinimap(); }
@@ -925,6 +1125,12 @@ export class Game {
     this.bench?.update(dt);
     const bs = this.bench?.status();
     if (bs) this.ui.toastStatus(bs);
+    // adaptive quality (robust hysteresis; never mid-fight disruptive, pixelRatio only)
+    this.adaptive.update(dt, this.fps, {
+      setPixelRatio: (r) => this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, r)),
+      setProfile: (q) => { if (q !== this.save.data.settings.quality) { this.save.data.settings.quality = q; this.applyProfile(q); } },
+      getProfile: () => this.save.data.settings.quality,
+    });
 
     inp.lateClear();
   }
@@ -933,6 +1139,7 @@ export class Game {
   private onSpotted(spotter: Enemy): void {
     this.mission.spotted = true; this.mission.ghost = false;
     this.ui.killfeed(`Occhio! Individuato dalla guardia #${spotter.id}!`);
+    this.audio.bark('alert'); this.audio.sting('combat');
     const shoutR = spotter.kind === 'captain' ? 34 : 22;
     for (const e of this.enemies) {
       if (e === spotter || e.dead || e.inCombat) continue;
@@ -949,7 +1156,25 @@ export class Game {
     }
   }
 
-  /** scripted bot for reproducible benchmarks (no input device needed) */
+  /** ranger thrown knives: telegraphed projectiles the player can dodge (central resolution) */
+  private resolveRangerKnives(): void {
+    for (const e of this.enemies) {
+      const r = e as unknown as { threwKnife?: boolean };
+      if (e.dead || !r.threwKnife) continue;
+      r.threwKnife = false; // consumed (contract with enemy.ts)
+      const d = Math.hypot(e.pos.x - this.player.pos.x, e.pos.z - this.player.pos.z);
+      if (d > 15) continue;
+      const blocked = this.world.losBlocked(e.pos.x, e.pos.y + 1.5, e.pos.z,
+        this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z);
+      if (blocked) continue;
+      this.audio.swoosh();
+      this.burst(this.player.pos, 0xffd98a, 6);
+      if (this.player.dodgeT > 0 || this.player.iframes > 0) { this.ui.toast('Coltello schivato!'); continue; }
+      const fromYaw = Math.atan2(this.player.pos.x - e.pos.x, this.player.pos.z - e.pos.z) + Math.PI;
+      if (this.player.takeDamage(12, fromYaw)) { /* applied */ }
+      this.ui.damageFlash(0.5); this.cam.addShake(0.25); this.vibrate(30);
+    }
+  }
   private driveBot(dt: number, inp: InputManager): void {
     if (this.botMode === 'off') return;
     // bench god-mode: measure rendering/AI cost, not bot survival
@@ -1036,7 +1261,8 @@ export class Game {
   private drawMinimap(): void {
     const el = this.ui.els['minimap'];
     if (!el) return;
-    const S = 110; const R = 46 / (S / 2); // world units per px
+    const zoom = this.ui.minimapZoom || 1;
+    const S = 110; const R = (46 / (S / 2)) / zoom; // zoomable radius
     let html = '';
     const dot = (x: number, z: number, c: string, s = 5): string => {
       const dx = (x - this.player.pos.x) / R + S / 2;
