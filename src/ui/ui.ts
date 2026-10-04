@@ -49,6 +49,7 @@ export class UI {
           ${this.btn('btn-help', '? Comandi')}
         </div>
         <div id="menu-save" style="margin-top:10px;color:#7d8ea8;font-size:13px"></div>
+        <div id="menu-slots" style="display:flex;gap:8px;justify-content:center;margin-top:8px"></div>
         <div style="margin-top:8px;color:#5b6b85;font-size:12px">Offline · Si installa come app · Touch + Controller</div>
       </div>
     </div>
@@ -73,7 +74,7 @@ export class UI {
         </div>
       </div>
       <div id="cam-zone" style="position:absolute;right:0;bottom:0;width:58vw;height:62vh;pointer-events:auto"></div>
-      <div style="position:absolute;right:10px;bottom:calc(24px + env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(3,64px);gap:8px;pointer-events:auto">
+      <div id="act-grid" style="position:absolute;right:10px;bottom:calc(24px + env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(3,64px);gap:8px;pointer-events:auto">
         ${this.btn('t-jump', 'SALTO', '')}
         ${this.btn('t-attack', 'ATT', 'border-color:var(--acc)')}
         ${this.btn('t-heavy', 'PES', '')}
@@ -84,7 +85,7 @@ export class UI {
         ${this.btn('t-interact', 'USA', '')}
         ${this.btn('t-smoke', 'FUMO', '')}
       </div>
-      <div style="position:absolute;left:10px;top:calc(120px + env(safe-area-inset-top));display:flex;gap:8px;pointer-events:auto">
+      <div id="sys-row" style="position:absolute;left:10px;top:calc(120px + env(safe-area-inset-top));display:flex;gap:8px;pointer-events:auto">
         ${this.btn('t-sprint', 'CORSA', '')}
         ${this.btn('t-knife', 'COLT', '')}
         ${this.btn('t-pause', 'II', '')}
@@ -171,6 +172,83 @@ export class UI {
     window.setTimeout(() => { el.style.display = 'none'; }, ms);
   }
   damageFlash(v: number): void { this.dmgT = Math.max(this.dmgT, v); }
+  /** persistent status line (benchmark, hidden state) — throttled by caller */
+  toastStatus(txt: string): void {
+    let el = this.root.querySelector<HTMLElement>('#status-line');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'status-line';
+      el.setAttribute('style', 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.65);padding:4px 12px;border-radius:6px;font-size:12px;color:#7dff9e;white-space:nowrap');
+      this.els['hud']?.appendChild(el);
+    }
+    el.style.display = 'block';
+    if (el.textContent !== txt) el.textContent = txt;
+  }
+  hideStatus(): void { this.root.querySelector<HTMLElement>('#status-line')?.remove(); }
+  /** contextual buttons: highlight ASS/USA only when usable, dim empty tools */
+  setContext(canAssass: boolean, canUse: boolean, smoke: number, knives: number): void {
+    const set = (id: string, on: boolean, dim: boolean): void => {
+      const el = this.root.querySelector<HTMLElement>('#' + id);
+      if (!el) return;
+      el.style.opacity = dim ? '0.35' : on ? '1' : '0.55';
+      el.style.borderColor = on ? '#e63946' : '#3a4a63';
+    };
+    set('t-assass', canAssass, false);
+    set('t-interact', canUse, false);
+    set('t-smoke', false, smoke <= 0);
+    set('t-knife', false, knives <= 0);
+  }
+  /** left-handed mode: mirror joystick/camera zones + button clusters */
+  setLefty(lefty: boolean): void {
+    const swap = (id: string, left: string, right: string): void => {
+      const el = this.root.querySelector<HTMLElement>('#' + id);
+      if (!el) return;
+      el.style.left = lefty ? right : left;
+      el.style.right = lefty ? left : right;
+    };
+    swap('joy-zone', '0', 'auto'); swap('cam-zone', 'auto', '0');
+    const jz = this.root.querySelector<HTMLElement>('#joy-zone');
+    const cz = this.root.querySelector<HTMLElement>('#cam-zone');
+    if (jz && cz) {
+      jz.style.left = lefty ? 'auto' : '0'; jz.style.right = lefty ? '0' : 'auto';
+      cz.style.left = lefty ? '0' : 'auto'; cz.style.right = lefty ? 'auto' : '0';
+      const jb = this.root.querySelector<HTMLElement>('#joy-base');
+      if (jb) { jb.style.left = lefty ? 'auto' : '34px'; jb.style.right = lefty ? '34px' : 'auto'; }
+    }
+    swap('act-grid', 'auto', '10px'); swap('sys-row', '10px', 'auto');
+    const ag = this.root.querySelector<HTMLElement>('#act-grid');
+    if (ag) { ag.style.left = lefty ? '10px' : 'auto'; ag.style.right = lefty ? 'auto' : '10px'; }
+    const sr = this.root.querySelector<HTMLElement>('#sys-row');
+    if (sr) { sr.style.left = lefty ? 'auto' : '10px'; sr.style.right = lefty ? '10px' : 'auto'; }
+  }
+  setUiScale(s: number): void { this.root.style.fontSize = `${16 * s}px`; }
+  /** "NASCOSTO" badge when fully concealed */
+  setHidden(v: boolean): void {
+    let el = this.root.querySelector<HTMLElement>('#hidden-badge');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'hidden-badge';
+      el.textContent = 'NASCOSTO';
+      el.setAttribute('style', 'position:absolute;bottom:26%;left:50%;transform:translateX(-50%);font-size:12px;letter-spacing:3px;color:#7dff9e;background:rgba(4,20,10,.7);border:1px solid #2c5a3a;padding:4px 14px;border-radius:12px;display:none');
+      this.els['hud']?.appendChild(el);
+    }
+    el.style.display = v ? 'block' : 'none';
+  }
+  /** offscreen threat arrow: -1 left, 1 right, 2 behind, 0 none/visible */
+  setThreat(dir: number): void {
+    let el = this.root.querySelector<HTMLElement>('#threat-arrow');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'threat-arrow';
+      el.setAttribute('style', 'position:absolute;top:50%;font-size:22px;color:#e63946;display:none;text-shadow:0 0 8px #e63946');
+      this.els['hud']?.appendChild(el);
+    }
+    if (dir === 0) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.textContent = dir === 2 ? '!!' : dir < 0 ? '◀ !' : '! ▶';
+    el.style.left = dir < 0 ? '8px' : 'auto';
+    el.style.right = dir > 0 ? '8px' : 'auto';
+  }
   killfeed(txt: string): void {
     const el = this.els['killfeed']!;
     const d = document.createElement('div'); d.textContent = txt;

@@ -7,6 +7,11 @@ export class AudioEngine {
   private step = 0;
   muted = false;
   volume = 0.8;
+  mood: 'stealth' | 'combat' | 'search' | 'escape' = 'stealth';
+
+  setMood(m: 'stealth' | 'combat' | 'search' | 'escape'): void {
+    if (this.mood !== m) { this.mood = m; this.step = 0; }
+  }
 
   ensure(): void {
     if (this.ctx) { if (this.ctx.state === 'suspended') void this.ctx.resume(); return; }
@@ -70,25 +75,36 @@ export class AudioEngine {
   ui(): void { this.osc('sine', 880, 880, 0.06, 0.12); }
   vault(): void { this.noise(0.1, 0.16, 1000); }
 
-  /** Dark ambient loop: bass pulse + hats, timer-based (cheap). */
+  /** Dark ambient loop: bass pulse + hats. Tempo/character follow game mood. */
   startMusic(): void {
     if (!this.ctx || this.musicTimer !== null) return;
     const tick = (): void => {
       if (!this.ctx || !this.musicGain || this.muted) return;
-      const seq = [55, 55, 65.4, 49];
+      // mood -> tempo + root movement (stealth sparse, combat driving)
+      const cfg = {
+        stealth: { gap: 560, seq: [55, 55, 65.4, 49], cut: 220, gain: 0.4 },
+        search: { gap: 460, seq: [55, 58.3, 65.4, 58.3], cut: 300, gain: 0.5 },
+        escape: { gap: 340, seq: [65.4, 73.4, 82.4, 98], cut: 420, gain: 0.55 },
+        combat: { gap: 300, seq: [55, 55, 82.4, 73.4], cut: 520, gain: 0.65 },
+      }[this.mood];
+      const seq = cfg.seq;
       const n = seq[this.step % seq.length];
       const t = this.ctx.currentTime;
       const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
       o.type = 'sawtooth'; o.frequency.value = n;
-      const f = this.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 220;
+      const f = this.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = cfg.cut;
       g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.5, t + 0.05);
+      g.gain.exponentialRampToValueAtTime(cfg.gain, t + 0.05);
       g.gain.exponentialRampToValueAtTime(0.0002, t + 0.5);
       o.connect(f); f.connect(g); g.connect(this.musicGain);
       o.start(t); o.stop(t + 0.6);
       this.step++;
+      if (this.musicTimer !== null) {
+        clearInterval(this.musicTimer);
+        this.musicTimer = window.setInterval(tick, cfg.gap);
+      }
     };
-    this.musicTimer = window.setInterval(tick, 420);
+    this.musicTimer = window.setInterval(tick, 560);
   }
   stopMusic(): void { if (this.musicTimer !== null) { clearInterval(this.musicTimer); this.musicTimer = null; } }
 }
