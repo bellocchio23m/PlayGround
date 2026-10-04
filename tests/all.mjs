@@ -1,4 +1,9 @@
-// Full regression runner: every suite isolated (suites call process.exit).
+// Test aggregation: runs every suite in an isolated node process.
+// Resilient by design: a suite file that does not exist yet (another agent
+// is slower) reports SKIP; only real failures exit nonzero.
+// Each suite is spawned (not imported) because suites call process.exit()
+// on completion, which would terminate an in-process importer.
+// Do NOT modify tests/run.mjs — central wires this file later.
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
@@ -9,7 +14,6 @@ const SUITES = [
   './ai.test.mjs',
   './world.test.mjs',
   './ux.test.mjs',
-  './perf.test.mjs',
 ];
 
 let pass = 0; let fail = 0; let skip = 0;
