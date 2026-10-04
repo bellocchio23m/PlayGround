@@ -6,6 +6,15 @@ import { angleDiff, clamp } from '../core/utils';
 export interface VisionSample {
   dist: number; inFov: boolean; blocked: boolean; crouch: boolean;
   sprinting: boolean; elevatedAttacker: boolean;
+  /** ambient light on the player, 0 (pitch dark) .. 1 (fully lit). Default 1 = legacy behavior. */
+  light?: number;
+}
+
+/** stance suspicion multiplier: still/crouched is quiet, sprinting is loud. Crouch wins ties. */
+export function stanceMul(crouch: boolean, sprinting: boolean): number {
+  if (crouch) return 0.6;
+  if (sprinting) return 1.5;
+  return 1.0;
 }
 
 /** 0..1 visibility factor. */
@@ -20,6 +29,9 @@ export function visibility(s: VisionSample): number {
     v *= 0.35;
   }
   if (s.sprinting) v *= CFG.stealth.sprintDetectMult;
+  // light-aware detection: darkness hides. Default light=1 keeps legacy behavior.
+  const l = s.light ?? 1;
+  v *= 0.45 + 0.55 * clamp(l, 0, 1);
   return clamp(v, 0, 1.5);
 }
 
