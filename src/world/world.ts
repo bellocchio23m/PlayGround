@@ -18,6 +18,20 @@ export class World {
   spawnPoints: { player: THREE.Vector3; enemies: THREE.Vector3[][] } = { player: new THREE.Vector3(0, 0, 26), enemies: [] };
   lamps: THREE.PointLight[] = [];
   bounds = new THREE.Box3(new THREE.Vector3(-46, 0, -46), new THREE.Vector3(46, 30, 46));
+  /** PHASE-3 (level-design): unlockable shortcut gates.
+   *  CENTRAL CONTRACT (game.ts): each interactable with kind 'shortcut' (ids below) resolves as:
+   *  on interact -> `taken=true`, hide/rotate its prop mesh (visible change), then add a runtime
+   *  walkable link: `ledges.push({min:from-ish, max:to-ish, topY, kind:'vault'})` + a thin collider
+   *  slab from `from` to `to` at `topY` so `groundHeight()` stays consistent. Coordinates below are
+   *  the EXACT endpoints central must use (top surface heights included in `from.y`/`to.y`).
+   *  - 'gate-west': raised plank at W2 east edge; drops a bridge W2 roof -> villa roof parapet.
+   *  - 'gate-east': chained ladder on E3 west face; drops a climb-down E3 roof -> east alley. */
+  shortcutGates: Array<{ id: string; from: THREE.Vector3; to: THREE.Vector3; topY: number }> = [];
+  /** PHASE-3: points of interest for central UI ("nearest POI hint"). Read-only data. */
+  pois: Array<{ id: string; label: string; pos: THREE.Vector3; hint: string }> = [];
+  /** PHASE-3: noisy generator props. CENTRAL CONTRACT: central masks/attenuates player-generated
+   *  NoiseEvents whose source is within ~9m of any entry (sneaking near a generator is safer). */
+  generators: THREE.Vector3[] = [];
   private ray = new THREE.Raycaster();
   /** PRODUCTION material library: flat-shaded, zero textures, 1 shader family.
    *  TEMPORARY placeholders (to replace with skinned/textured assets later):
@@ -41,6 +55,17 @@ export class World {
     this.warehouse();
     this.plaza();
     this.patrols();
+    // ---- phase-3 micro-zones / landmarks / shortcuts (additive, own section) ----
+    this.northwestHeights();
+    this.canalZone();
+    this.marketStalls();
+    this.caldaieProps();
+    this.distantLandmarks();
+    this.shortcutProps();
+    this.hiddenAreas();
+    this.breakersAndGenerators();
+    this.extraPatrols();
+    this.poisInit();
     this.scene.add(this.group);
   }
 
@@ -357,6 +382,318 @@ export class World {
     mk('cache-smoke', 'Fumogeni +2', -20, 7.3, 2, 0x9aa7bd);   // west roof W2
     mk('cache-knife', 'Coltelli +2', 12.5, 0.6, -12, 0xc9a227); // east alley
     mk('intel', 'Informazioni (+60 XP)', 0, 1.2, 22, 0x7dff9e); // fountain
+  }
+
+  // ================= PHASE-3 LEVEL DESIGN (additive) =================
+  // ALTERNATE PATHS ledger (5+ approaches, ground + roof + alley each):
+  //  P1 plaza (m2/m8): (a) ground tra tavoli/stalli/bancarelle, (b) drop dalla piattaforma casse est (dropPlatform),
+  //     (c) tetti E2->E3 + scala gate-east, (d) vicolo caldaie -> breaker-alley -> uscita sud canale.
+  //  P2 east roof doc (m3): (a) ponteggi sud-est (scaffold ledge), (b) casse vicolo est, (c) E2->E3 plank,
+  //     (d) NUOVO: canale -> pipe climb -> muro ovest canale -> salto tetto E2.
+  //  P3 warehouse/Sigillo (m4): (a) porta frontale nord, (b) tetto villa -> drop, (c) vicolo ovest -> cortile,
+  //     (d) NUOVO: soppalco interno (attic) come osservatorio prima del colpo.
+  //  P4 extraction south (m4/m5/m6/m7): (a) strada centrale, (b) tetti ovest W3 -> drop, (c) vicolo est,
+  //     (d) NUOVO: canale uscita sud (33,24) -> tags across plaza.
+  //  P5 north villa doc (m6): (a) terra via cortile, (b) tetti ovest -> NUOVO gate-west bridge, (c) Tetti Alti
+  //     NW -> viewpoint drop verso villa, (d) canale -> tetti est -> villa da est.
+  //  P6 NW heights garden/attic caches: (a) catena W1->plankW->NW1->NW2->NW3, (b) drop da NW3, (c) alley ovest.
+  //
+  // MICRO-ZONES: (a) Plaza del Mercato (cortile sud + stalli), (b) Vicolo delle Caldaie (canale est
+  //  x~33 z[-8,24], pareti alte = corridoio stealth, pipe per uscire), (c) Tetti Alti Nord-Ovest
+  //  (3 tetti 6/9/12m + planks + viewpoint). Landmark a distanza: antenna est (esistente), ciminiera
+  //  rossa (30,-32), torre idrica BLU sui Tetti Alti.
+
+  /** shared cache spawner (phase-3). CENTRAL CONTRACT (game.ts tryInteract): mirror the existing
+   *  cache handling for these NEW ids (all kind 'cache', taken=false initially):
+   *  - 'cache-attic'  -> knives+2 (cap 8), toast 'Coltelli +2 (soppalco)'
+   *  - 'cache-garden' -> smoke+2 (cap 6), toast 'Fumogeni +2 (giardino pensile)'
+   *  - 'cache-canal'  -> +60 XP via addXp (same as 'intel'), toast 'Intel +60 XP' */
+  private addCache(id: string, label: string, x: number, y: number, z: number, color: number): void {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.5, 0.5),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.3, emissive: color, emissiveIntensity: 0.35 }));
+    mesh.position.set(x, y, z);
+    this.group.add(mesh);
+    this.interactables.push({ id, pos: new THREE.Vector3(x, y, z), radius: 3, label, kind: 'cache', taken: false, mesh });
+  }
+
+  /** breaker-box prop (phase-3). CENTRAL CONTRACT: on interact (kind 'breaker') -> taken=true, dim the
+   *  prop emissive strip (mesh visible change), and switch OFF lamps within 20m. 'blackout-plaza'
+   *  (m6 setFlag) = plaza lamps off from mission start. Breakers do NOT cut moon/hemi light. */
+  private addBreaker(id: string, label: string, x: number, y: number, z: number): void {
+    const boxM = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.9, 0.3), this.matLib.metal);
+    boxM.position.set(x, y, z);
+    this.group.add(boxM);
+    const strip = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.05),
+      new THREE.MeshBasicMaterial({ color: 0x7dff9e }));
+    strip.position.set(x, y + 0.25, z + 0.16);
+    this.group.add(strip);
+    this.colliders.push(new THREE.Box3(
+      new THREE.Vector3(x - 0.3, y - 0.45, z - 0.15), new THREE.Vector3(x + 0.3, y + 0.45, z + 0.15)));
+    this.interactables.push({ id, pos: new THREE.Vector3(x, y, z), radius: 3, label, kind: 'breaker', taken: false, mesh: strip });
+  }
+
+  /** NORTH-WEST heights micro-zone: 3 stepped rooftops 6/9/12m linked by planks, fed from west row. */
+  private northwestHeights(): void {
+    // climb chain: W1 roof (top 4.5) -> plankW -> NW1 (6.3) -> plankA -> NW2 (9.3) -> plankB -> NW3 (12.3)
+    this.buildingBlock(-34, -14, 8, 6, 8, 0x35302e);    // NW1, top 6.3
+    this.buildingBlock(-34, -24, 8, 9, 8, 0x2f333c);    // NW2, top 9.3 (garden + blue tower)
+    this.buildingBlock(-34, -34, 8, 12, 8, 0x38322c);   // NW3, top 12.3 (viewpoint)
+    const plank = this.matLib.wood;
+    this.box(-28, 5.0, -14, 5, 0.25, 1.4, plank);       // plankW: W1(x>=-26) -> NW1(x<=-30)
+    this.box(-34, 7.5, -19, 1.4, 0.25, 4.5, plank);     // plankA over the z -20..-18 gap, top ~7.6
+    this.box(-34, 10.5, -29, 1.4, 0.25, 4.5, plank);    // plankB over the z -30..-28 gap, top ~10.6
+    this.ledges.push({
+      min: new THREE.Vector3(-30.5, 0, -14.7), max: new THREE.Vector3(-25.5, 5.2, -13.3),
+      topY: 5.2, kind: 'vault',
+    });
+    this.ledges.push({
+      min: new THREE.Vector3(-34.7, 0, -21.2), max: new THREE.Vector3(-33.3, 7.7, -16.8),
+      topY: 7.7, kind: 'vault',
+    });
+    this.ledges.push({
+      min: new THREE.Vector3(-34.7, 0, -31.2), max: new THREE.Vector3(-33.3, 10.7, -26.8),
+      topY: 10.7, kind: 'climb',
+    });
+    // cover crates on NW roofs (crouch stealth up high)
+    const crate = this.matLib.crateWood;
+    this.box(-36, 6.9, -12, 1.2, 1.2, 1.2, crate);
+    this.box(-32, 9.9, -26, 1.2, 1.2, 1.2, crate);
+  }
+
+  /** EASTERN canal/alley micro-zone (Vicolo delle Caldaie): walled stealth corridor + pipe climbs. */
+  private canalZone(): void {
+    const wall = this.mat(0x2b2f36);
+    this.box(29, 2.5, 8, 1, 5, 32, wall);               // west wall x[28.5,29.5] z[-8,24], top 5.0
+    this.box(37, 2.5, 8, 1, 5, 32, wall);               // east wall x[36.5,37.5], top 5.0
+    const floorM = this.mat(0x10141a);
+    this.box(33, 0.03, 8, 7, 0.06, 32, floorM, false);  // dark service-lane floor (visual only)
+    // pipes to climb out (visual cylinders, no collision) + climb ledges on inner faces
+    const pipeM = this.matLib.rustMetal;
+    for (const x of [29.7, 36.3]) {
+      const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 30, 8), pipeM);
+      pipe.rotation.x = Math.PI / 2;
+      pipe.position.set(x, 2.6, 8);
+      this.group.add(pipe);
+    }
+    this.ledges.push({
+      min: new THREE.Vector3(28.5, 0, 0), max: new THREE.Vector3(29.5, 5.0, 16),
+      topY: 5.0, kind: 'climb',
+    });
+    this.ledges.push({
+      min: new THREE.Vector3(36.5, 0, 0), max: new THREE.Vector3(37.5, 5.0, 16),
+      topY: 5.0, kind: 'climb',
+    });
+    // steam vents: VISUAL ONLY (no gameplay effect, no collision, no light)
+    const steamM = new THREE.MeshBasicMaterial({ color: 0xaab4c4, transparent: true, opacity: 0.45 });
+    for (const [x, z] of [[31, -2], [35, 10], [32, 20]] as Array<[number, number]>) {
+      const puff = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1.2, 8), steamM);
+      puff.position.set(x, 0.6, z);
+      this.group.add(puff);
+    }
+    this.addCache('cache-canal', 'Intel del canale (+60 XP)', 33, 0.6, 21.5, 0x7dff9e);
+  }
+
+  /** Plaza del Mercato: market stalls with striped awnings + crate maze (stealth cover). */
+  private marketStalls(): void {
+    const M = this.matLib;
+    const stalls: Array<[number, number, number]> = [[-4, 0, 19], [0, 0, 27.5], [5.5, 0, 23]];
+    // striped awnings via 2 shared InstancedMesh (red / cream) = 2 draw calls for all stripes
+    const stripeGeo = new THREE.BoxGeometry(0.55, 0.06, 2.4);
+    const redM = new THREE.MeshStandardMaterial({ color: 0x8c2f39, roughness: 0.85 });
+    const creamM = new THREE.MeshStandardMaterial({ color: 0xd8cfb8, roughness: 0.85 });
+    const red = new THREE.InstancedMesh(stripeGeo, redM, 6);
+    const cream = new THREE.InstancedMesh(stripeGeo, creamM, 6);
+    const m4 = new THREE.Matrix4();
+    let ri = 0; let ci = 0;
+    for (const [sx, , sz] of stalls) {
+      this.box(sx, 0.5, sz, 2.2, 1.0, 1.2, M.crateWood);           // counter (cover)
+      this.box(sx - 1.0, 1.3, sz - 0.5, 0.12, 2.6, 0.12, M.wood, false); // poles (no collide)
+      this.box(sx + 1.0, 1.3, sz + 0.5, 0.12, 2.6, 0.12, M.wood, false);
+      for (let s = 0; s < 4; s++) {
+        m4.makeTranslation(sx - 0.825 + s * 0.55, 2.6, sz);
+        if (s % 2 === 0) red.setMatrixAt(ri++, m4); else cream.setMatrixAt(ci++, m4);
+      }
+    }
+    red.count = ri; cream.count = ci;
+    red.instanceMatrix.needsUpdate = true; cream.instanceMatrix.needsUpdate = true;
+    this.group.add(red); this.group.add(cream);
+    // crate maze: slalom cover around the fountain (keeps LOS broken vs plaza patrols)
+    const maze: Array<[number, number, number, number]> = [
+      [-8, 0.6, 20, 1.2], [-6.5, 0.5, 22, 1], [-5, 0.6, 20, 1.2], [-3.5, 0.5, 22.5, 1],
+      [7, 0.5, 21, 1], [8.5, 0.5, 23, 1], [7, 0.6, 25, 1.2], [2, 0.5, 28.5, 1],
+    ];
+    for (const [x, y, z, s] of maze) this.box(x, y, z, s, s, s, M.crateWood);
+  }
+
+  /** Vicolo delle Caldaie dressing: wall pipes + breaker/steam already in canalZone; generator added below. */
+  private caldaieProps(): void {
+    // vertical boiler pipes on the canal west wall outer face (visual rhythm, no collision)
+    const pipeM = this.matLib.metal;
+    for (const z of [-4, 4, 12, 20]) {
+      const p = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 5, 8), pipeM);
+      p.position.set(28.2, 2.5, z);
+      this.group.add(p);
+    }
+    // crates at canal mouths (step + cover, do not seal the entrances)
+    const crate = this.matLib.crateWood;
+    this.box(31, 0.5, -6.5, 1, 1, 1, crate);
+    this.box(35, 0.5, 22.5, 1, 1, 1, crate);
+  }
+
+  /** long-range landmarks: red chimney (east-north) + blue water tower + 2nd antenna (NW heights). */
+  private distantLandmarks(): void {
+    // red chimney: readable from anywhere south/west
+    this.box(30, 6, -32, 2.5, 12, 2.5, this.mat(0x5a2e26));
+    this.box(30, 12.4, -32, 3.2, 0.8, 3.2, this.mat(0x8c2f39), false); // red cap (visual)
+    // blue water tower on NW2 roof (top 9.3): legs + tank, landmark + cover
+    const blue = this.mat(0x2e6fd8, 0.6, 0);
+    this.box(-34, 9.9, -24, 2.6, 1.2, 2.6, this.matLib.wood);          // tower base (cover)
+    const tank = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 2.2, 12), blue);
+    tank.position.set(-34, 11.6, -24);
+    this.group.add(tank);
+    this.colliders.push(new THREE.Box3(
+      new THREE.Vector3(-35.5, 10.5, -25.5), new THREE.Vector3(-32.5, 12.7, -22.5)));
+    // second antenna on NW3 (tallest point north-west, pairs with east antenna)
+    this.box(-34, 13.8, -34, 0.25, 3.0, 0.25, this.matLib.metal);
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0xff3b3b }));
+    tip.position.set(-34, 15.4, -34);
+    this.group.add(tip);
+    // viewpoint railing on NW3 south edge (visual only)
+    const rail = this.matLib.metal;
+    this.box(-34, 12.9, -30.2, 4, 0.12, 0.12, rail, false);
+  }
+
+  /** unlockable shortcut props. See `shortcutGates` field contract for central runtime behavior. */
+  private shortcutProps(): void {
+    const wood = this.matLib.wood;
+    // gate-west: RAISED plank at W2 east edge (visually up = locked); drops W2 roof -> villa parapet.
+    const raised = this.box(-13.5, 8.2, -2, 0.25, 3.2, 1.4, wood);
+    this.box(-13.5, 6.9, -2.8, 0.2, 1.2, 0.2, wood);
+    this.box(-13.5, 6.9, -1.2, 0.2, 1.2, 0.2, wood);
+    this.interactables.push({
+      id: 'gate-west', pos: new THREE.Vector3(-13.5, 7, -2), radius: 3.2,
+      label: 'Abbatti la passerella (scorciatoia ovest)', kind: 'shortcut', taken: false, mesh: raised,
+    });
+    this.shortcutGates.push({
+      id: 'gate-west',
+      from: new THREE.Vector3(-14, 6.8, -2),   // W2 roof east edge (top surface)
+      to: new THREE.Vector3(-11, 7.8, -25),    // villa roof NW parapet (top surface)
+      topY: 7.3,                               // central builds the runtime slab at this height
+    });
+    // future-walkway pylons (visual only until the gate opens; no collision)
+    const pyl = this.matLib.metal;
+    for (const [px, pz] of [[-13.25, -7.75], [-12.5, -13.5], [-11.75, -19.25]] as Array<[number, number]>) {
+      this.box(px, 3.5, pz, 0.3, 7, 0.3, pyl, false);
+    }
+    // gate-east: CHAINED ladder on E3 west face (visually chained = locked); drops E3 roof -> alley.
+    const railM = this.matLib.metal;
+    this.box(12.85, 6.5, 17.4, 0.18, 13, 0.18, railM);
+    this.box(12.85, 6.5, 18.6, 0.18, 13, 0.18, railM);
+    for (let i = 0; i < 5; i++) this.box(12.85, 1.5 + i * 2.6, 18, 0.14, 0.14, 1.3, railM);
+    const chain = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3),
+      new THREE.MeshStandardMaterial({ color: 0xc9a227, roughness: 0.4, metalness: 0.7 }));
+    chain.position.set(12.85, 2.0, 18);
+    this.group.add(chain);
+    this.interactables.push({
+      id: 'gate-east', pos: new THREE.Vector3(12.6, 1.5, 18), radius: 3.2,
+      label: 'Sgancia la scala (scorciatoia est)', kind: 'shortcut', taken: false, mesh: chain,
+    });
+    this.shortcutGates.push({
+      id: 'gate-east',
+      from: new THREE.Vector3(13, 13.3, 18),   // E3 roof west lip (top surface)
+      to: new THREE.Vector3(12.4, 0, 14),      // alley floor by the scaffolding
+      topY: 13.3,                              // central builds the runtime climb ledge to this height
+    });
+    // m6 objective prop: villa ledger on the north villa roof (top 7.8).
+    // CENTRAL CONTRACT: kind 'doc', id 'doc-villa'. tryInteract: taken=true + mesh hidden,
+    // save.inventory.doc=true, and matches collect objective target 'doc-villa' (like 'doc').
+    const ledger = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.12, 0.45),
+      new THREE.MeshStandardMaterial({ color: 0xf1fa8c, roughness: 0.5, emissive: 0x554f00, emissiveIntensity: 0.6 }));
+    ledger.position.set(4, 8.0, -30);
+    this.group.add(ledger);
+    this.interactables.push({
+      id: 'doc-villa', pos: new THREE.Vector3(4, 8.0, -30), radius: 3,
+      label: 'Prendi il libro mastro', kind: 'doc', taken: false, mesh: ledger,
+    });
+  }
+
+  /** two hidden useful areas: warehouse attic loft + NW rooftop garden. */
+  private hiddenAreas(): void {
+    const crate = this.matLib.crateWood;
+    // warehouse attic: crate stair inside the warehouse -> loft slab (observatory + cache)
+    this.box(0, 0.5, -36.8, 1, 1, 1, crate);
+    this.box(1.2, 1.4, -38.2, 0.9, 0.9, 0.9, crate);
+    this.box(2.6, 2.3, -39.2, 0.8, 0.8, 0.8, crate);
+    this.box(5, 3.2, -40.5, 5, 0.3, 3, this.matLib.wood);   // loft slab, top 3.35
+    this.ledges.push({
+      min: new THREE.Vector3(2.5, 0, -42), max: new THREE.Vector3(7.5, 3.35, -39),
+      topY: 3.35, kind: 'vault',
+    });
+    this.addCache('cache-attic', 'Coltelli +2 (soppalco)', 5, 3.85, -40.5, 0xc9a227);
+    // rooftop garden on NW2 (top 9.3): planters + green blobs (visual) + cache
+    const soil = this.mat(0x2a2118);
+    this.box(-35.5, 9.55, -22, 1.6, 0.5, 0.8, soil);
+    this.box(-32.5, 9.55, -26, 1.6, 0.5, 0.8, soil);
+    const leaf = new THREE.MeshBasicMaterial({ color: 0x4d8c4a });
+    for (const [x, z] of [[-35.5, -22], [-32.5, -26]] as Array<[number, number]>) {
+      const bush = new THREE.Mesh(new THREE.SphereGeometry(0.45, 8, 8), leaf);
+      bush.position.set(x, 10.1, z);
+      this.group.add(bush);
+    }
+    this.addCache('cache-garden', 'Fumogeni +2 (giardino pensile)', -33, 9.9, -25, 0x9aa7bd);
+  }
+
+  /** breaker boxes + noisy generators. See addBreaker / generators contracts. */
+  private breakersAndGenerators(): void {
+    this.addBreaker('breaker-plaza', 'Sabota il quadro (piazza)', -8.5, 1.2, 20);
+    this.addBreaker('breaker-alley', 'Sabota il quadro (canale)', 29.8, 1.2, 8);
+    // noisy generator props (visual only meshes; noise-masking resolved by central via `generators`)
+    const genM = this.matLib.rustMetal;
+    const lampM = new THREE.MeshBasicMaterial({ color: 0xffb45e });
+    for (const [gx, gz] of [[35, 22.5], [-9, 25.5]] as Array<[number, number]>) {
+      this.box(gx, 0.5, gz, 1.4, 1.0, 0.9, genM);
+      const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 1.0, 8), this.matLib.metal);
+      drum.position.set(gx + 0.4, 1.3, gz);
+      this.group.add(drum);
+      const pilot = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, 0.1), lampM);
+      pilot.position.set(gx - 0.4, 0.8, gz + 0.46);
+      this.group.add(pilot);
+      this.generators.push(new THREE.Vector3(gx, 0.5, gz));
+    }
+  }
+
+  /** extra patrol routes (indices 5-7; routes 0-4 above stay byte-identical for old missions). */
+  private extraPatrols(): void {
+    const V = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, y, z);
+    // ROUTE 5: NW ground loop (heights overlook watch)
+    this.patrolRoutes.push([V(-30, 0, -10), V(-28, 0, -22), V(-30, 0, -34)]);
+    // ROUTE 6: canal loop (Vicolo delle Caldaie)
+    this.patrolRoutes.push([V(33, 0, -4), V(33, 0, 10), V(33, 0, 20)]);
+    // ROUTE 7: market/plaza loop (m7 chase + m8 boss arena)
+    this.patrolRoutes.push([V(-6, 0, 18), V(6, 0, 18), V(6, 0, 26), V(-6, 0, 26)]);
+  }
+
+  /** 10+ POIs for central UI hints (viewpoints, shortcuts, caches, breakers, generators, extraction). */
+  private poisInit(): void {
+    const P = (id: string, label: string, x: number, y: number, z: number, hint: string): void => {
+      this.pois.push({ id, label, pos: new THREE.Vector3(x, y, z), hint });
+    };
+    P('poi-view-nw', 'Belvedere Tetti Alti', -34, 12.3, -34, 'Il punto piu alto a nord-ovest: osserva villa e piazza.');
+    P('poi-antenna-e', 'Antenna Est', 20, 16.3, 18, 'Landmark orientale: il tetto E3 e sotto.');
+    P('poi-chimney', 'Ciminiera Rossa', 30, 12, -32, 'Landmark nord-est: segna il canale e il magazzino.');
+    P('poi-tower', 'Torre Idrica Blu', -34, 11.6, -24, 'Landmark nord-ovest sopra il giardino pensile.');
+    P('poi-mercato', 'Plaza del Mercato', 0, 1, 22, 'Copertura tra stalli e casse; generatore e quadro vicini.');
+    P('poi-canale', 'Vicolo delle Caldaie', 33, 0.5, 8, 'Corridoio stealth: tubi per salire sui muri, cache a sud.');
+    P('poi-gate-west', 'Passerella Ovest', -13.5, 7, -2, 'Scorciatoia sbloccabile: tetto W2 -> villa.');
+    P('poi-gate-east', 'Scala Est', 12.6, 6, 18, 'Scorciatoia sbloccabile: tetto E3 -> vicolo.');
+    P('poi-cache-attic', 'Soppalco Magazzino', 5, 3.8, -40.5, 'Cache nascosta sopra il magazzino: scala di casse interna.');
+    P('poi-cache-garden', 'Giardino Pensile', -33, 9.9, -25, 'Cache sui Tetti Alti: sali da W1 con le passerelle.');
+    P('poi-breaker-plaza', 'Quadro Piazza', -8.5, 1.2, 20, 'Sabotalo per spegnere i lampioni della piazza.');
+    P('poi-breaker-alley', 'Quadro Canale', 29.8, 1.2, 8, 'Sabotalo per buio nel vicolo est.');
+    P('poi-gen-plaza', 'Generatore Piazza', -9, 0.5, 25.5, 'Frastuono: copre i tuoi rumori se resti vicino.');
+    P('poi-gen-alley', 'Generatore Canale', 35, 0.5, 22.5, 'Frastuono: copre i tuoi rumori se resti vicino.');
+    P('poi-extract-sud', 'Estrazione Sud', 0, 0, 34, 'Punto di estrazione: semina i nemici prima di sparire.');
   }
 
   private patrols(): void {
