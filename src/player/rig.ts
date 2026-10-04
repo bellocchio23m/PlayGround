@@ -109,13 +109,49 @@ export class PoseAnimator {
       A.rotation.x = s2 * 0.8; B.rotation.x = opts.attacking > 0 ? B.rotation.x : s1 * 0.8;
       rig.hips.position.y += Math.abs(Math.sin(f)) * 0.05 * swing;
     }
+    if (state === 'sprint') {
+      // sprint lean: torso pitched forward, big arm pump, cloak streaming
+      const lean = 0.28 * swing + 0.08;
+      rig.hips.rotation.x = lean - cb * 0.1;
+      rig.torso.rotation.x = 0.12 * swing;
+      rig.cloak.rotation.x = 0.9 + Math.sin(t * 9) * 0.08;
+      rig.head.rotation.x = -lean * 0.7;
+    }
     if (state === 'jump' || state === 'fall') {
       L.rotation.x = -0.5; R.rotation.x = 0.35; A.rotation.set(-0.6, 0, 0.5); B.rotation.set(-0.4, 0, -0.5);
     }
     if (state === 'vault' || state === 'climb') {
       const k = Math.sin(Math.min(1, opts.dodge) * Math.PI);
+      // vault variation: staggered tuck + forward pitch by phase
+      const ph = Math.min(1, opts.dodge);
+      const lead = ph < 0.5 ? ph * 2 : (1 - ph) * 2;
       A.rotation.x = -2.2 * k; B.rotation.x = -2.2 * k;
-      L.rotation.x = -0.9 * k; R.rotation.x = -0.5 * k;
+      A.rotation.z = 0.12 + lead * 0.35; B.rotation.z = -0.12 - lead * 0.2;
+      L.rotation.x = -0.9 * k - lead * 0.4; R.rotation.x = -0.5 * k + lead * 0.3;
+      rig.hips.rotation.x = 0.35 * k;
+    }
+    if (state === 'mantle') {
+      // hang-pull: arms haul from overhead to chest, legs kick then tuck
+      const ph = Math.min(1, opts.dodge);
+      const pull = Math.sin(ph * Math.PI);
+      const haul = 1 - ph; // 1 → 0: arms start overhead
+      A.rotation.set(-2.6 * haul - 0.5 * pull, 0, 0.35);
+      B.rotation.set(-2.6 * haul - 0.5 * pull, 0, -0.35);
+      L.rotation.x = -0.7 * pull - 0.4 * haul; R.rotation.x = 0.5 * pull - 0.3 * haul;
+      rig.hips.rotation.x = 0.3 * pull;
+      rig.hips.position.y -= 0.12 * haul;
+    }
+    if (state === 'hang') {
+      // edge-hang: arms overhead gripping, body hanging straight, slight sway + leg dangle
+      const sway = Math.sin(t * 1.8) * 0.05;
+      A.rotation.set(-2.9, 0, 0.25 + sway); B.rotation.set(-2.9, 0, -0.25 - sway);
+      L.rotation.x = 0.25 + Math.sin(t * 1.8 + 0.6) * 0.08;
+      R.rotation.x = 0.35 + Math.sin(t * 1.8 + 1.4) * 0.08;
+      L.rotation.z = 0.08; R.rotation.z = -0.08;
+      rig.hips.rotation.x = -0.12;
+      rig.hips.position.y -= 0.18;
+      rig.torso.rotation.x = -0.1;
+      rig.cloak.rotation.x = -0.1 + sway;
     }
     if (opts.attacking > 0) {
       // 3-phase slash: windup -> slash -> recover
