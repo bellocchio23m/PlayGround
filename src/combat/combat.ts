@@ -1,5 +1,36 @@
 // Timing-based katana combat: light/heavy, combo, parry window, dodge,
 // stagger, finishers. Distance + direction + timing + enemy state matter.
+//
+// Phase-3 tuning (objectives 11-20) — all inside this file, additive only:
+//  - STAGGER LEVELS (obj 15): light 0.35 < heavy 0.90 < dash 1.10 < special 1.20
+//    < perfect-parry 1.60. Normal parry staggers 1.10. Values overwrite the
+//    baseline set by Enemy.takeDamage (heavy?0.55:0.30) so visuals/AI read one
+//    consistent number. All values < 3s: readable, never stunlock.
+//  - DASH ATTACK (obj 11): dodge-cancel into attack within 0.5s = lunging
+//    heavy. Detected via player.dodgeCD (counts down from 0.8 in player.ts):
+//    dodgeCD > 0.30  <=>  dodge started < 0.5s ago. Player.update only allows
+//    attacks once dodgeT <= 0, so a swing with dodgeCD > 0.30 is exactly the
+//    "dodge-cancel into attack" window. Dash uses heavy base damage + range
+//    attackRange + 1.0 and its own active window 0.30-0.80.
+//  - PERFECT PARRY (obj 12): enemy strike landing while player.parryT > 0.30
+//    (parryT counts down from 0.45, so > 0.30 = within first 0.15s) opens a
+//    perfect riposte: 2.0x damage for 2.0s (player.riposteT = 2.0, mirrored in
+//    CombatSystem.perfectT), enemy stagger 1.6s, label 'PERFETTA'.
+//    Normal parry (0.10 < parryT <= 0.30): 1.5x for 1.4s, stagger 1.1.
+//  - FALCE LUNARE special (obj 13): see trySpecial.
+//  - DIRECTIONAL REACTIONS (obj 14): every landed hit nudges enemy.pos by
+//    0.4m along the hit direction (walls are thick; 0.4m never tunnels) and
+//    records CombatSystem.lastHitDir = {x,z} (unit xz) for visuals.
+//  - PARRY READABILITY (obj 16): CombatSystem.parryFlashT counts down from
+//    0.40 (normal) / 0.80 (perfect); central code flashes UI while > 0.
+//  - GHOST-HITBOX PREVENTION (obj 17): strict range + height (|dy| <= 2.5) +
+//    facing (angleDiff <= 1.0) checks PLUS per-kind active-frame gating:
+//    light 0.35-0.75, heavy 0.30-0.70, dash 0.30-0.80, special immediate.
+//    debugLastResolution records the last evaluated {range, phase,
+//    facingDiff, dealt} for QA (mutated in place, never reallocated).
+//  - PERF (obj 20 / rules): no per-frame allocations in hit resolution.
+//    Hot paths use only primitives; lastHitDir allocates ONLY on a landed
+//    hit (event, not per-frame); debugLastResolution is a reused object.
 import * as THREE from 'three';
 import { CFG } from '../core/config';
 import { angleDiff } from '../core/utils';
@@ -13,41 +44,182 @@ export interface CombatFx {
   damageNum(at: THREE.Vector3, dmg: number, kind: string): void;
 }
 
+/** Shared tuning mirrored by tests/combat.test.mjs (keep in sync). */
+export const COMBAT_TUNING = {
+  lightWindow: [0.35, 0.75] as const,
+  heavyWindow: [0.3, 0.7] as const,
+  dashWindow: [0.3, 0.8] as const,
+  dashRangeBonus: 1.0,
+  heavyRangeBonus: 0.4,
+  arcRad: 1.0,
+  heightTol: 2.5,
+  riposteMul: 1.5,
+  riposteDur: 1.4,
+  perfectMul: 2.0,
+  perfectDur: 2.0,
+  /** parryT counts down from 0.45; > this = perfect (first 0.15s). */
+  perfectParryT: 0.3,
+  parryMinT: 0.1,
+  staggerLight: 0.35,
+  staggerHeavy: 0.9,
+  staggerDash: 1.1,
+  staggerSpecial: 1.2,
+  staggerParry: 1.1,
+  staggerPerfect: 1.6,
+  parryFlash: 0.4,
+  parryFlashPerfect: 0.8,
+  knockback: 0.4,
+  specialRange: 3.4,
+  specialDmgMul: 1.6,
+  specialCost: 35,
+  specialCooldown: 6,
+} as const;
+
+function nowMs(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') return performance.now();
+  return Date.now();
+}
+
 export class CombatSystem {
   private hitDone = false;
 
+  /** Last landed-hit direction (unit xz, attacker -> victim). Set on hits only. */
+  lastHitDir: { x: number; z: number } | null = null;
+  /** UI flash timer after a successful parry (0.4 normal / 0.8 perfect). Counts down. */
+  parryFlashT = 0;
+  /** Remaining perfect-riposte window (mirrors player.riposteT while perfect). */
+  perfectT = 0;
+  /** Remaining Falce Lunare cooldown in seconds. Counts down. */
+  specialCD = 0;
+  /** QA record of the last hit evaluation (mutated in place, never replaced). */
+  debugLastResolution: { range: number; phase: number; facingDiff: number; dealt: boolean } = {
+    range: 0, phase: 0, facingDiff: 0, dealt: false,
+  };
+
+  private perfectActive = false;
+  private specialLastMs = -1e12;
+  private lastWallMs = 0;
+
   constructor(private audio: AudioEngine, private fx: CombatFx) {}
+
+  /** Deterministic timer decay; central wiring may call each frame (additive API). */
+  tick(dt: number): void {
+    if (dt <= 0) return;
+    if (this.parryFlashT > 0) this.parryFlashT = Math.max(0, this.parryFlashT - dt);
+    if (this.specialCD > 0) this.specialCD = Math.max(0, this.specialCD - dt);
+    this.lastWallMs = nowMs();
+  }
+
+  /** Wall-clock decay so timers count down even if tick() is never called. */
+  private decayWall(): void {
+    const now = nowMs();
+    if (this.lastWallMs === 0) { this.lastWallMs = now; return; }
+    let dt = (now - this.lastWallMs) / 1000;
+    this.lastWallMs = now;
+    if (dt <= 0) return;
+    if (dt > 0.25) dt = 0.25; // tab-switch clamp: no huge jumps
+    if (this.parryFlashT > 0) this.parryFlashT = Math.max(0, this.parryFlashT - dt);
+    if (this.specialCD > 0) this.specialCD = Math.max(0, this.specialCD - dt);
+  }
+
+  /** Remaining special cooldown (live value combining field + wall clock). */
+  getSpecialCooldown(): number {
+    const elapsed = (nowMs() - this.specialLastMs) / 1000;
+    const wallLeft = COMBAT_TUNING.specialCooldown - elapsed;
+    const left = wallLeft > this.specialCD ? wallLeft : this.specialCD;
+    return left > 0 ? left : 0;
+  }
+
+  /** True while the special is unlocked, charged and affordable (for HUD gating). */
+  isSpecialReady(player: Player): boolean {
+    const unlocked = (player as unknown as { specialUnlocked?: boolean }).specialUnlocked === true;
+    if (!unlocked) return false;
+    if (player.stamina < COMBAT_TUNING.specialCost) return false;
+    return this.getSpecialCooldown() <= 0;
+  }
+
+  /**
+   * Dash-attack detection (obj 11): dodge-cancel into attack within 0.5s.
+   * player.dodgeCD counts down from 0.8 (see player.ts dodge entry), so
+   * dodgeCD > 0.30  <=>  dodge started less than 0.5s ago. Attacks are only
+   * allowed once dodgeT <= 0, hence attackT > 0 + dodgeCD > 0.30 isolates the
+   * cancel window without touching player.ts.
+   */
+  isDashAttack(player: Player): boolean {
+    return player.attackT > 0 && player.dodgeCD > 0.3;
+  }
+
+  private syncPerfect(player: Player): void {
+    if (player.riposteT <= 0) {
+      this.perfectActive = false;
+      this.perfectT = 0;
+    } else if (this.perfectActive) {
+      this.perfectT = player.riposteT;
+    }
+  }
 
   /** player attack hit resolution — called each frame while attacking */
   updatePlayerAttack(player: Player, enemies: Enemy[], cam: { addShake(v: number): void }): { kills: number; hits: number } {
     let kills = 0; let hits = 0;
+    this.decayWall();
+    this.syncPerfect(player);
     if (player.attackT <= 0) { this.hitDone = false; return { kills, hits }; }
-    const dur = player.attackKind === 'heavy' ? 0.62 : 0.42;
-    const phase = 1 - player.attackT / dur;
-    // active window mid-swing
-    if (phase < 0.35 || phase > 0.75 || this.hitDone) return { kills, hits };
-    this.hitDone = true;
     const heavy = player.attackKind === 'heavy';
-    const base = heavy ? CFG.combat.heavyDmg : CFG.combat.lightDmg;
-    // phases: light [startup .10 / active .35-.75 / recovery], heavy [.18 / .3-.7]
-    // riposte (after parry): +50% damage
+    const dash = this.isDashAttack(player);
+    const dur = heavy ? 0.62 : 0.42;
+    const phase = 1 - player.attackT / dur;
+    // per-kind active-frame gating (ghost-hitbox prevention, obj 17):
+    // light 0.35-0.75, heavy 0.30-0.70, dash 0.30-0.80.
+    const wLo = dash ? 0.3 : heavy ? 0.3 : 0.35;
+    const wHi = dash ? 0.8 : heavy ? 0.7 : 0.75;
+    if (phase < wLo || phase > wHi || this.hitDone) {
+      this.debugLastResolution.phase = phase;
+      if (!this.hitDone) this.debugLastResolution.dealt = false;
+      return { kills, hits };
+    }
+    this.hitDone = true;
+    // riposte (after parry): +50%; perfect riposte: x2 (consumed on resolution)
     const riposte = player.riposteT > 0;
+    const perfect = this.perfectActive && player.riposteT > 0;
     if (riposte) player.riposteT = 0;
-    const dmg = Math.round(base * player.dmgMul * (player.combo === 2 ? 1.35 : 1) * (riposte ? 1.5 : 1));
-    const range = CFG.combat.attackRange + (heavy ? 0.4 : 0);
+    if (perfect) { this.perfectActive = false; this.perfectT = 0; }
+    // dash = lunging heavy: heavy base damage regardless of pressed kind
+    const base = dash ? CFG.combat.heavyDmg : heavy ? CFG.combat.heavyDmg : CFG.combat.lightDmg;
+    const comboMul = player.combo === 2 ? 1.35 : 1;
+    const ripMul = perfect ? 2.0 : riposte ? 1.5 : 1;
+    const dmg = Math.round(base * player.dmgMul * comboMul * ripMul);
+    const range = CFG.combat.attackRange + (dash ? 1.0 : heavy ? 0.4 : 0);
     for (const e of enemies) {
       if (e.dead) continue;
       const dx = e.pos.x - player.pos.x; const dz = e.pos.z - player.pos.z;
       const d = Math.hypot(dx, dz);
-      if (d > range || Math.abs(e.pos.y - player.pos.y) > 2.5) continue;
+      const dy = e.pos.y - player.pos.y;
+      const ady = dy < 0 ? -dy : dy;
       const ang = Math.atan2(dx, dz);
-      if (angleDiff(ang, player.yaw + Math.PI) > 1.0) continue; // must face target
+      const fdiff = angleDiff(ang, player.yaw + Math.PI);
+      // QA record (reused object, no allocation)
+      this.debugLastResolution.range = d;
+      this.debugLastResolution.phase = phase;
+      this.debugLastResolution.facingDiff = fdiff;
+      this.debugLastResolution.dealt = false;
+      if (d > range || ady > 2.5) continue;
+      if (fdiff > 1.0) continue; // must face target
       const finisher = e.hp <= e.maxHp * 0.25;
       const dealt = finisher ? Math.max(dmg, e.hp) : dmg;
-      const killed = e.takeDamage(dealt, player.yaw, heavy, this.audio);
+      const killed = e.takeDamage(dealt, player.yaw, heavy || dash, this.audio);
+      // stagger levels (obj 15): overwrite baseline with tuned values
+      e.stagger = dash ? 1.1 : heavy ? 0.9 : 0.35;
+      // directional reaction (obj 14): tiny safe nudge + unit dir for visuals
+      if (d > 1e-4) {
+        const nx = dx / d; const nz = dz / d;
+        e.pos.x += nx * 0.4; e.pos.z += nz * 0.4;
+        this.lastHitDir = { x: nx, z: nz };
+      }
+      this.debugLastResolution.dealt = true;
       this.fx.slash(e.pos);
-      this.fx.damageNum(e.pos, dealt, finisher ? 'FINISHER' : riposte ? 'RIPOSTE' : heavy ? 'PESANTE' : 'colpo');
-      cam.addShake(heavy ? 0.35 : 0.18);
+      const label = finisher ? 'FINISHER' : perfect ? 'PERFETTA' : riposte ? 'RIPOSTE' : dash ? 'SCATTO' : heavy ? 'PESANTE' : 'colpo';
+      this.fx.damageNum(e.pos, dealt, label);
+      cam.addShake(dash || heavy ? 0.35 : 0.18);
       hits++;
       if (killed) kills++;
     }
@@ -57,19 +229,39 @@ export class CombatSystem {
   /** enemy swing resolution: player can parry (timing) or dodge (i-frames).
    *  Consumes the per-tick `struck` flag — never misses the damage window. */
   updateEnemyAttacks(player: Player, enemies: Enemy[], onPlayerHit: () => void): void {
+    this.decayWall();
+    this.syncPerfect(player);
     for (const e of enemies) {
       if (e.dead || !e.struck) continue;
       e.struck = false;
+      const ex = e as unknown as { strikeRange?: number; isHeavySwing?: boolean };
+      const reach = ex.strikeRange ?? 2.6; // brutes slam wider
       const dx = player.pos.x - e.pos.x; const dz = player.pos.z - e.pos.z;
       const d = Math.hypot(dx, dz);
-      if (d > 2.6 || Math.abs(player.pos.y - e.pos.y) > 2.2) continue;
+      if (d > reach || Math.abs(player.pos.y - e.pos.y) > 2.2) continue;
+      // heavy swings (brute slam) are UNPARRYABLE — dodge or distance only
+      const unparryable = !!ex.isHeavySwing;
       // parry? player parry active + facing enemy
-      if (player.parryT > 0.1) {
+      if (!unparryable && player.parryT > 0.1) {
         const ang = Math.atan2(dx, dz); // direction player -> enemy
         if (angleDiff(ang, player.yaw + Math.PI) < 1.2) {
-          // successful parry: stagger enemy, no damage, open riposte window
-          e.stagger = 1.1; e.windup = 0; e.swingT = 0;
-          player.riposteT = 1.4;
+          // perfect = strike lands within first 0.15s (parryT > 0.30)
+          const perfect = player.parryT > 0.3;
+          if (perfect) {
+            // perfect riposte: 2x window 2s + longer stagger + longer flash
+            e.stagger = 1.6; e.windup = 0; e.swingT = 0;
+            player.riposteT = 2.0;
+            this.perfectActive = true;
+            this.perfectT = 2.0;
+            this.parryFlashT = 0.8;
+          } else {
+            // successful parry: stagger enemy, no damage, open riposte window
+            e.stagger = 1.1; e.windup = 0; e.swingT = 0;
+            player.riposteT = 1.4;
+            this.perfectActive = false;
+            this.perfectT = 0;
+            this.parryFlashT = 0.4;
+          }
           this.audio.parry();
           this.fx.spark(player.pos);
           continue;
@@ -80,6 +272,57 @@ export class CombatSystem {
       if (player.takeDamage(e.dmg, fromYaw)) { /* damage applied */ }
       onPlayerHit();
     }
+  }
+
+  /**
+   * "Falce Lunare" spinning AoE special (obj 13).
+   * Gated on (player as {specialUnlocked}).specialUnlocked — central wiring
+   * sets the flag and calls this method (e.g. on special-button input).
+   * Spinning 360° sweep: range 3.4, damage = heavy * 1.6, costs 35 stamina,
+   * 6s internal cooldown. Immediate radius check (no active frames).
+   */
+  trySpecial(player: Player, enemies: Enemy[], cam: { addShake(v: number): void }): { kills: number; hits: number } {
+    this.decayWall();
+    this.syncPerfect(player);
+    const none = { kills: 0, hits: 0 };
+    const unlocked = (player as unknown as { specialUnlocked?: boolean }).specialUnlocked === true;
+    if (!unlocked) return none;
+    if (this.getSpecialCooldown() > 0) return none;
+    if (player.stamina < COMBAT_TUNING.specialCost) return none;
+    player.stamina = Math.max(0, player.stamina - COMBAT_TUNING.specialCost);
+    this.specialLastMs = nowMs();
+    this.specialCD = COMBAT_TUNING.specialCooldown;
+    this.lastWallMs = this.specialLastMs;
+    const dmg = Math.round(CFG.combat.heavyDmg * COMBAT_TUNING.specialDmgMul * player.dmgMul);
+    let kills = 0; let hits = 0;
+    for (const e of enemies) {
+      if (e.dead) continue;
+      const dx = e.pos.x - player.pos.x; const dz = e.pos.z - player.pos.z;
+      const d = Math.hypot(dx, dz);
+      const dy = e.pos.y - player.pos.y;
+      const ady = dy < 0 ? -dy : dy;
+      this.debugLastResolution.range = d;
+      this.debugLastResolution.phase = 1;
+      this.debugLastResolution.facingDiff = 0; // 360° sweep: no facing check
+      this.debugLastResolution.dealt = false;
+      if (d > COMBAT_TUNING.specialRange || ady > 2.5) continue;
+      const finisher = e.hp <= e.maxHp * 0.25;
+      const dealt = finisher ? Math.max(dmg, e.hp) : dmg;
+      const killed = e.takeDamage(dealt, player.yaw, true, this.audio);
+      e.stagger = COMBAT_TUNING.staggerSpecial;
+      if (d > 1e-4) {
+        const nx = dx / d; const nz = dz / d;
+        e.pos.x += nx * 0.4; e.pos.z += nz * 0.4;
+        this.lastHitDir = { x: nx, z: nz };
+      }
+      this.debugLastResolution.dealt = true;
+      this.fx.slash(e.pos);
+      this.fx.damageNum(e.pos, dealt, 'FALCE LUNARE');
+      cam.addShake(0.4);
+      hits++;
+      if (killed) kills++;
+    }
+    return { kills, hits };
   }
 
   /** throwing knife: fast projectile resolved instantly with LOS check */
