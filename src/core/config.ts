@@ -36,8 +36,7 @@ export const CFG = {
 };
 
 export interface UpgradeDef { id: string; name: string; desc: string; max: number; }
-export const UPGRADES: UpgradeDef[] = [
-  { id: 'speed', name: 'Muscoli felini', desc: '+8% velocità movimento per livello' },
+export const UPGRADES: UpgradeDef[] = [  { id: 'speed', name: 'Muscoli felini', desc: '+8% velocità movimento per livello' },
   { id: 'stealth', name: 'Passo d\u2019ombra', desc: '-12% rumore e rilevamento per livello' },
   { id: 'stamina', name: 'Fiato lungo', desc: '+20 stamina max per livello' },
   { id: 'combat', name: 'Lama pesante', desc: '+15% danno katana per livello' },
@@ -45,3 +44,17 @@ export const UPGRADES: UpgradeDef[] = [
   { id: 'recovery', name: 'Secondo fiato', desc: '+regen stamina e HP fuori combattimento' },
   { id: 'tools', name: 'Borsa attrezzi', desc: '+1 fumogeno e coltello max per livello' },
 ].map((u) => ({ ...u, max: 3 }));
+
+// ---- A55 performance profiles (MEDIUM = Galaxy A55 5G default) ----
+export interface PerfProfile {
+  id: 'low' | 'med' | 'high';
+  pixelRatio: number; antialias: boolean;
+  lampCount: number; fogNear: number; fogFar: number;
+  particleMul: number; aiHz: number; minimap: boolean;
+  extraGuards: number; civilians: boolean;
+}
+export const PROFILES: Record<string, PerfProfile> = {
+  low: { id: 'low', pixelRatio: 0.75, antialias: false, lampCount: 2, fogNear: 40, fogFar: 95, particleMul: 0.4, aiHz: 8, minimap: false, extraGuards: 0, civilians: false },
+  med: { id: 'med', pixelRatio: 1.0, antialias: false, lampCount: 4, fogNear: 55, fogFar: 130, particleMul: 0.8, aiHz: 10, minimap: true, extraGuards: 0, civilians: true },
+  high: { id: 'high', pixelRatio: 1.5, antialias: true, lampCount: 4, fogNear: 60, fogFar: 150, particleMul: 1.0, aiHz: 12, minimap: true, extraGuards: 2, civilians: true },
+};
