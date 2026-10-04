@@ -10,11 +10,13 @@ import { inFov, isBehind, suspicionRate, visibility } from '../stealth/perceptio
 import { buildRig, PoseAnimator, Rig } from '../player/rig';
 import { AudioEngine } from '../audio/audio';
 
+const _strafe = new THREE.Vector3();
+
 export type EnemyKind = 'guard' | 'elite' | 'captain';
 
 export interface PlayerRef {
   pos: THREE.Vector3; crouch: boolean; sprinting: boolean; dead: boolean;
-  elevated: boolean; moving: number; yaw: number; attackT: number;
+  elevated: boolean; moving: number; yaw: number; attackT: number; hidden: boolean;
 }
 
 const KIND_STATS: Record<EnemyKind, { hp: number; dmg: number; speed: number; view: number; atkCd: number }> = {
@@ -44,13 +46,15 @@ export class Enemy {
   lostT = 0;
   atkCD = 0; windup = 0; swingT = 0; stagger = 0; hitT = 0;
   struck = false; // set the exact tick a swing lands (consumed by CombatSystem)
-  acc = 0; // brain accumulator for fixed 10Hz ticks
+  acc = 0; // brain accumulator for fixed-Hz ticks
+  strafeDir = 1; searchT = 0; ringT = 0;
   dead = false; deathT = 0; seen = false; // seen = corpse discovered
   alertedOthers = false;
   tickOffset: number;
   moveAmt = 0;
   combatT = 0;
   parryable = false;
+  marker: THREE.Sprite | null = null;
 
   constructor(kind: EnemyKind, patrol: THREE.Vector3[]) {
     this.kind = kind;
@@ -132,7 +136,9 @@ export class Enemy {
     void blocked;
 
     if (!player.dead && vis > 0.02) {
-      const rate = suspicionRate(vis, dist) * this.viewMul;
+      // alertness gain differs by archetype: guards slow, elites keen, captains relentless
+      const alertMul = this.kind === 'captain' ? 1.3 : this.kind === 'elite' ? 1.15 : 0.85;
+      const rate = suspicionRate(vis, dist) * this.viewMul * alertMul;
       const was = this.suspicion;
       this.suspicion = clamp(this.suspicion + rate * dt, 0, 100);
       if (was < 35 && this.suspicion >= 35 && (this.state === AIState.Patrol || this.state === AIState.Idle)) {
@@ -146,7 +152,8 @@ export class Enemy {
       }
       if (this.inCombat) { this.lastKnown.copy(player.pos); this.lastKnownT = now; this.lostT = 0; }
     } else {
-      this.suspicion = Math.max(0, this.suspicion - CFG.stealth.decayRate * dt);
+      const decay = CFG.stealth.decayRate * (player.hidden ? 3 : 1) * dt;
+      this.suspicion = Math.max(0, this.suspicion - decay);
       if (this.state === AIState.Suspicious && this.suspicion <= 0) this.state = AIState.Patrol;
     }
 
@@ -187,13 +194,22 @@ export class Enemy {
         if (player.dead) { this.state = AIState.Returning; break; }
         this.lostT = now - this.lastKnownT;
         if (this.lostT > CFG.stealth.losePlayerTime && dist > 20) {
-          this.state = AIState.Searching; this.investigate.copy(this.lastKnown);
+          this.state = AIState.Searching; this.investigate.copy(this.lastKnown); this.searchT = 0;
           onLost(this);
           break;
         }
         this.combatT += dt;
         if (dist > 2.0) {
-          this.moveToward(player.pos, this.speed, dt, world);
+          // elites/captains strafe to flank instead of charging straight
+          if ((this.kind === 'elite' || this.kind === 'captain') && dist < 8 && dist > 2.4) {
+            if (Math.random() < dt * 0.4) this.strafeDir *= -1;
+            const px = player.pos.x - this.pos.x; const pz = player.pos.z - this.pos.z;
+            const m = Math.hypot(px, pz) || 1;
+            _strafe.set(player.pos.x + (-pz / m) * 4 * this.strafeDir + (px / m) * 1.5, 0, player.pos.z + (px / m) * 4 * this.strafeDir + (pz / m) * 1.5);
+            this.moveToward(_strafe, this.speed * 0.85, dt, world);
+          } else {
+            this.moveToward(player.pos, this.speed, dt, world);
+          }
         } else {
           this.face(player.pos, 10, dt);
           // attack with telegraph
@@ -211,11 +227,20 @@ export class Enemy {
         break;
       }
       case AIState.Searching: {
-        if (!player.dead && vis > 0.3) { this.state = AIState.Combat; this.lastKnownT = now; break; }
-        if (this.moveToward(this.investigate, this.speed * 0.7, dt, world)) {
-          this.waitT += dt;
-          this.yaw += dt * 2;
-          if (this.waitT > 4) { this.waitT = 0; this.state = AIState.Returning; }
+        if (!player.dead && vis > 0.3) { this.state = AIState.Combat; this.lastKnownT = now; this.searchT = 0; break; }
+        // progressive spiral search around last known position, then give up gradually
+        this.searchT += dt; this.ringT += dt;
+        const arrived = this.moveToward(this.investigate, this.speed * 0.7, dt, world);
+        if (arrived || this.ringT > 2.4) {
+          this.ringT = 0;
+          const a = this.searchT * 1.5 + this.id * 1.7;
+          const r = 2 + this.searchT * 1.1;
+          this.investigate.set(this.lastKnown.x + Math.cos(a) * r, 0, this.lastKnown.z + Math.sin(a) * r);
+        }
+        this.yaw += dt * (arrived ? 2 : 0.4);
+        if (this.searchT > 12) {
+          this.searchT = 0; this.ringT = 0; this.waitT = 0;
+          this.state = AIState.Returning; this.suspicion = Math.max(0, this.suspicion - 50);
         }
         break;
       }
