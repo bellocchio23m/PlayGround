@@ -57,7 +57,7 @@ export function buildRig(kind: 'kestrel' | 'guard' | 'elite' | 'captain'): Rig {
   const grip = part(0.05, 0.22, 0.05, trim, 0, 0, 0); sword.add(grip);
   const guard = part(0.12, 0.03, 0.12, guardTrim, 0, 0.12, 0); sword.add(guard);
   const blade = part(0.035, 0.85, 0.07, bladeMat, 0, 0.56, 0); sword.add(blade);
-  sword.rotation.x = Math.PI / 2 - 0.2;
+  sword.rotation.x = 0.1; // hangs along the arm; raised only while attacking/parrying
   // cloak strip (kestrel)
   const cloak = part(0.4, 0.7, 0.05, clothRed, 0, 0.1, -0.2); hips.add(cloak);
   cloak.visible = kind === 'kestrel';
@@ -125,6 +125,8 @@ export class PoseAnimator {
       B.rotation.x = -2.4 * slash;
       B.rotation.z = -0.9 * slash;
       rig.sword.rotation.x = Math.PI / 2 - 0.2 - 1.1 * slash;
+    } else if (opts.parry <= 0) {
+      rig.sword.rotation.x = 0.1; // rest position along the arm
     }
     if (opts.parry > 0) {
       B.rotation.x = -1.6; B.rotation.z = 1.1;

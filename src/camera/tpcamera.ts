@@ -63,6 +63,12 @@ export class ThirdPersonCamera {
       this.cur.z + (Math.random() - 0.5) * sh,
     );
     this.camera.lookAt(this.desired.x, this.desired.y + 0.2, this.desired.z);
+    // sprint FOV kick (speed feel), eased back otherwise
+    const targetFov = sprint ? 68 : 62;
+    if (Math.abs(this.camera.fov - targetFov) > 0.1) {
+      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 4);
+      this.camera.updateProjectionMatrix();
+    }
   }
 
   resize(w: number, h: number): void {

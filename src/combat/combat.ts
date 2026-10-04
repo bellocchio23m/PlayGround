@@ -29,7 +29,11 @@ export class CombatSystem {
     this.hitDone = true;
     const heavy = player.attackKind === 'heavy';
     const base = heavy ? CFG.combat.heavyDmg : CFG.combat.lightDmg;
-    const dmg = Math.round(base * player.dmgMul * (player.combo === 2 ? 1.35 : 1));
+    // phases: light [startup .10 / active .35-.75 / recovery], heavy [.18 / .3-.7]
+    // riposte (after parry): +50% damage
+    const riposte = player.riposteT > 0;
+    if (riposte) player.riposteT = 0;
+    const dmg = Math.round(base * player.dmgMul * (player.combo === 2 ? 1.35 : 1) * (riposte ? 1.5 : 1));
     const range = CFG.combat.attackRange + (heavy ? 0.4 : 0);
     for (const e of enemies) {
       if (e.dead) continue;
@@ -42,8 +46,8 @@ export class CombatSystem {
       const dealt = finisher ? Math.max(dmg, e.hp) : dmg;
       const killed = e.takeDamage(dealt, player.yaw, heavy, this.audio);
       this.fx.slash(e.pos);
-      this.fx.damageNum(e.pos, dealt, finisher ? 'FINISHER' : heavy ? 'PESANTE' : 'colpo');
-      cam.addShake(heavy ? 0.5 : 0.25);
+      this.fx.damageNum(e.pos, dealt, finisher ? 'FINISHER' : riposte ? 'RIPOSTE' : heavy ? 'PESANTE' : 'colpo');
+      cam.addShake(heavy ? 0.35 : 0.18);
       hits++;
       if (killed) kills++;
     }
@@ -61,10 +65,11 @@ export class CombatSystem {
       if (d > 2.6 || Math.abs(player.pos.y - e.pos.y) > 2.2) continue;
       // parry? player parry active + facing enemy
       if (player.parryT > 0.1) {
-        const ang = Math.atan2(-dx, -dz);
+        const ang = Math.atan2(dx, dz); // direction player -> enemy
         if (angleDiff(ang, player.yaw + Math.PI) < 1.2) {
-          // successful parry: stagger enemy, no damage
+          // successful parry: stagger enemy, no damage, open riposte window
           e.stagger = 1.1; e.windup = 0; e.swingT = 0;
+          player.riposteT = 1.4;
           this.audio.parry();
           this.fx.spark(player.pos);
           continue;

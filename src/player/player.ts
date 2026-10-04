@@ -45,6 +45,8 @@ export class Player {
   elevated = false; // was above target recently (for drop assassinations)
   lastGroundedY = 0;
   iframes = 0;
+  riposteT = 0; // counter window after successful parry: +50% dmg, faster startup
+  landDip = 0; // landing squash timer (feel)
 
   constructor(public events: PlayerEvents, private audio: AudioEngine) {
     this.rig = buildRig('kestrel');
@@ -62,7 +64,8 @@ export class Player {
 
   takeDamage(dmg: number, fromYaw: number): boolean {
     if (this.dead || this.iframes > 0 || this.dodgeT > 0) return false;
-    if (this.parryT > 0) return false; // parried (handled by combat system timing)
+    // NOTE: parry is resolved by CombatSystem with facing check — never blanket-block here,
+    // otherwise parrying the wrong way would grant free invincibility.
     this.hp -= dmg;
     this.hitT = 0.45;
     this.yaw = fromYaw;
@@ -92,9 +95,13 @@ export class Player {
     else this.stamina = Math.min(this.staminaMax, this.stamina + P.staminaRegen * this.regenMul * dt);
     // hp regen out of danger handled by game (calls heal)
 
-    // dodge
+    // dodge (cancellable dalla recovery dell'attacco: phase > 0.55)
     this.dodgeCD -= dt; this.iframes -= dt;
-    if (input.pressed.dodge && this.dodgeCD <= 0 && this.stamina > 10 && this.dodgeT <= 0) {
+    const atkDurNow = this.attackKind === 'heavy' ? 0.62 : 0.42;
+    const atkPhaseNow = this.attackT > 0 ? 1 - this.attackT / atkDurNow : 1;
+    if (input.pressed.dodge && this.dodgeCD <= 0 && this.stamina > 10 && this.dodgeT <= 0 &&
+      (this.attackT <= 0 || atkPhaseNow > 0.55)) {
+      if (this.attackT > 0) { this.attackT = 0; this.comboWindow = 0.4; } // cancel in dodge
       this.dodgeT = 0.42; this.dodgeCD = 0.8; this.iframes = CFG.combat ? 0.4 : 0.4;
       this.stamina -= 18; this.crouch = false;
       this.audio.vault();
@@ -105,6 +112,7 @@ export class Player {
       this.parryT = 0.45; this.parryCD = 0.9;
     }
     this.parryT = Math.max(0, this.parryT - dt);
+    this.riposteT = Math.max(0, this.riposteT - dt);
 
     // attack input (buffered)
     if ((input.pressed.attack || input.pressed.heavy) && this.attackT <= 0 && this.dodgeT <= 0 && this.vaultT <= 0 && this.climbT <= 0) {
@@ -179,6 +187,7 @@ export class Player {
         }
         if (fall > 12) this.takeDamage((fall - 12) * 8, this.yaw);
         this.state = 'landing';
+        this.landDip = hard ? 1 : 0.45; // squash + brief weight
       }
       this.pos.y = gy; this.vy = 0; this.grounded = true; this.coyote = 0.12; this.airTime = 0;
       this.lastGroundedY = gy;
@@ -211,12 +220,20 @@ export class Player {
     // vault / climb triggers (jump pressed near ledge handled via probes)
     if (input.pressed.jump || (wantMove && this.grounded)) this.tryTraversal(world);
 
-    // state label
-    this.hitT -= dt;
+    // state label (+ attack lunge: forward step during first 55% of swing)
+    this.hitT -= dt; this.landDip = Math.max(0, this.landDip - dt * 3);
     if (this.attackT > 0) {
       this.attackT -= dt;
       if (this.attackT <= 0) this.comboWindow = 0.6;
       this.state = 'attack';
+      const dur = this.attackKind === 'heavy' ? 0.62 : 0.42;
+      const ph = 1 - Math.max(0, this.attackT) / dur;
+      if (ph < 0.55) {
+        const lunge = (this.attackKind === 'heavy' ? 3.4 : 2.6) * (this.riposteT > 0 ? 1.3 : 1);
+        this.pos.x += -Math.sin(this.yaw) * lunge * dt;
+        this.pos.z += -Math.cos(this.yaw) * lunge * dt;
+        world.collideCircle(this.pos, 0.4, 1.4);
+      }
     } else if (this.parryT > 0.1) this.state = 'parry';
     else if (this.hitT > 0) this.state = 'hit';
     else if (!this.grounded) this.state = this.vy > 0 ? 'jump' : 'fall';
@@ -306,5 +323,8 @@ export class Player {
   private syncMesh(_dt: number): void {
     this.rig.group.position.copy(this.pos);
     this.rig.group.rotation.y = this.yaw;
+    // landing squash (subtle, recovers fast)
+    const s = 1 - 0.1 * Math.max(0, this.landDip);
+    this.rig.group.scale.set(1 + (1 - s) * 0.6, s, 1 + (1 - s) * 0.6);
   }
 }
