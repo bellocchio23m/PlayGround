@@ -1,0 +1,4 @@
+/* global game styles: prevent scroll/zoom gestures, safe areas */
+html, body, #app, #ui { height: 100%; }
+button { font-family: inherit; touch-action: manipulation; }
+button:active { transform: scale(.96); }
