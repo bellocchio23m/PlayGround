@@ -5,14 +5,17 @@ export interface InputState {
   sprint: boolean; crouch: boolean; crouchToggle: boolean;
   jump: boolean; attack: boolean; heavy: boolean; parry: boolean;
   dodge: boolean; interact: boolean; assassinate: boolean;
-  smoke: boolean; knife: boolean; pause: boolean;
+  smoke: boolean; knife: boolean; pause: boolean; lure: boolean; special: boolean;
 }
+
+export type InputAction = 'jump' | 'attack' | 'heavy' | 'parry' | 'dodge' | 'interact' | 'assassinate' | 'smoke' | 'knife' | 'pause' | 'lure' | 'special';
 
 function freshState(): InputState {
   return {
     moveX: 0, moveY: 0, camDX: 0, camDY: 0, sprint: false, crouch: false, crouchToggle: false,
     jump: false, attack: false, heavy: false, parry: false, dodge: false,
     interact: false, assassinate: false, smoke: false, knife: false, pause: false,
+    lure: false, special: false,
   };
 }
 
@@ -129,11 +132,13 @@ export class InputManager {
       case 'KeyQ': if (down) this.tap('assassinate'); break;
       case 'KeyG': if (down) this.tap('smoke'); break;
       case 'KeyF': if (down) this.tap('knife'); break;
+      case 'KeyT': if (down) this.tap('lure'); break;
+      case 'KeyR': if (down) this.tap('special'); break;
       case 'Escape': case 'KeyP': if (down) this.tap('pause'); break;
     }
   }
 
-  tap(action: 'jump' | 'attack' | 'heavy' | 'parry' | 'dodge' | 'interact' | 'assassinate' | 'smoke' | 'knife' | 'pause'): void {
+  tap(action: InputAction): void {
     this.pressed[action] = true; this.state[action] = true;
   }
 
@@ -161,13 +166,15 @@ export class InputManager {
       this.state.camDX += dz(gp.axes[2] ?? 0) * 14 * this.sens;
       this.state.camDY += dz(gp.axes[3] ?? 0) * 14 * this.sens;
       const b = (i: number): boolean => !!(gp.buttons[i]?.pressed);
-      const edge = (i: number, a: 'jump' | 'attack' | 'heavy' | 'parry' | 'dodge' | 'interact' | 'assassinate' | 'smoke' | 'knife' | 'pause'): void => {
+      const edge = (i: number, a: InputAction): void => {
         const was = this.gamepadPrev[i] ?? false;
         if (b(i) && !was) this.tap(a);
         this.gamepadPrev[i] = b(i);
       };
       edge(0, 'jump'); edge(2, 'attack'); edge(1, 'dodge'); edge(4, 'parry');
       edge(3, 'heavy'); edge(5, 'assassinate'); edge(9, 'pause');
+      edge(14, 'lure'); edge(15, 'special');
+      // RB (5) doubles as special when held with LT? keep simple: dpad L/R above.
       if (b(8)) this.pressed.crouchToggle = true;
       if (b(6)) this.tap('smoke'); if (b(7)) this.tap('knife');
       this.state.sprint = this.state.sprint || b(10);
@@ -184,7 +191,7 @@ export class InputManager {
       if (typeof p[k] === 'boolean') (p[k] as boolean) = false;
     }
     const s = this.state;
-    s.jump = s.attack = s.heavy = s.parry = s.dodge = s.interact = s.assassinate = s.smoke = s.knife = s.pause = false;
+    s.jump = s.attack = s.heavy = s.parry = s.dodge = s.interact = s.assassinate = s.smoke = s.knife = s.pause = s.lure = s.special = false;
     s.crouchToggle = false;
     s.camDX = 0; s.camDY = 0;
   }

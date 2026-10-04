@@ -4,6 +4,8 @@ export class AudioEngine {
   private master: GainNode | null = null;
   private musicGain: GainNode | null = null;
   private musicTimer: number | null = null;
+  private ambienceTimer: number | null = null;
+  private ambienceNodes: { src: AudioBufferSourceNode; filter: BiquadFilterNode; gain: GainNode; lfo: OscillatorNode; lfoGain: GainNode } | null = null;
   private step = 0;
   muted = false;
   volume = 0.8;
@@ -61,7 +63,16 @@ export class AudioEngine {
     src.start(t);
   }
 
-  footstep(run: boolean): void { this.noise(run ? 0.09 : 0.06, run ? 0.25 : 0.14, run ? 900 : 600); }
+  footstep(run: boolean, surface: 'stone' | 'metal' | 'wood' = 'stone'): void {
+    const cfg = {
+      stone: { cut: run ? 900 : 600, peak: run ? 0.25 : 0.14 },
+      metal: { cut: run ? 2400 : 1800, peak: run ? 0.2 : 0.11 },
+      wood: { cut: run ? 500 : 380, peak: run ? 0.28 : 0.16 },
+    }[surface];
+    this.noise(run ? 0.09 : 0.06, cfg.peak, cfg.cut);
+    if (surface === 'metal') this.osc('triangle', 1900, 1400, 0.07, 0.06);
+    if (surface === 'wood') this.osc('sine', 180, 90, 0.09, 0.12);
+  }
   jump(): void { this.noise(0.12, 0.15, 700); }
   land(hard: boolean): void { this.noise(hard ? 0.22 : 0.12, hard ? 0.4 : 0.2, hard ? 500 : 700); this.osc('sine', 120, 45, 0.18, hard ? 0.3 : 0.15); }
   swoosh(): void { this.noise(0.16, 0.3, 3200, 'bandpass'); }
@@ -71,6 +82,24 @@ export class AudioEngine {
   assassinate(): void { this.noise(0.3, 0.2, 900); this.osc('sine', 300, 60, 0.35, 0.3); }
   alert(): void { this.osc('sawtooth', 660, 880, 0.28, 0.22); this.osc('sawtooth', 440, 587, 0.28, 0.18); }
   suspicious(): void { this.osc('sine', 520, 660, 0.2, 0.16); }
+  /** Enemy voice barks: short procedural blips, distinct per kind (no assets). */
+  bark(kind: 'alert' | 'suspicious' | 'attack' | 'down'): void {
+    switch (kind) {
+      case 'alert': this.osc('square', 700, 1050, 0.12, 0.2); this.osc('square', 700, 1050, 0.12, 0.16); break;
+      case 'suspicious': this.osc('triangle', 420, 560, 0.18, 0.16); break;
+      case 'attack': this.osc('sawtooth', 300, 140, 0.22, 0.26); this.noise(0.1, 0.2, 1400); break;
+      case 'down': this.osc('sine', 380, 90, 0.4, 0.24); break;
+    }
+  }
+  /** Detection stingers per state — distinct two-tone motifs from alert()/suspicious(). */
+  sting(state: 'suspicious' | 'investigating' | 'combat' | 'lost'): void {
+    switch (state) {
+      case 'suspicious': this.osc('sine', 440, 554, 0.25, 0.18); this.osc('sine', 554, 659, 0.25, 0.14); break;
+      case 'investigating': this.osc('triangle', 330, 392, 0.3, 0.18); this.osc('triangle', 392, 494, 0.3, 0.14); break;
+      case 'combat': this.osc('sawtooth', 196, 392, 0.35, 0.24); this.osc('sawtooth', 147, 294, 0.35, 0.18); break;
+      case 'lost': this.osc('sine', 659, 440, 0.3, 0.16); this.osc('sine', 440, 330, 0.3, 0.12); break;
+    }
+  }
   pickup(): void { this.osc('sine', 660, 990, 0.12, 0.2); }
   ui(): void { this.osc('sine', 880, 880, 0.06, 0.12); }
   vault(): void { this.noise(0.1, 0.16, 1000); }
@@ -107,4 +136,52 @@ export class AudioEngine {
     this.musicTimer = window.setInterval(tick, 560);
   }
   stopMusic(): void { if (this.musicTimer !== null) { clearInterval(this.musicTimer); this.musicTimer = null; } }
+
+  /** Urban ambience: distant hum/traffic/wind loop via filtered noise + LFO. Cheap, idempotent, stoppable. */
+  startAmbience(): void {
+    if (!this.ctx || !this.master || this.ambienceTimer !== null || this.ambienceNodes) return;
+    try {
+      const ctx = this.ctx;
+      const len = Math.floor(ctx.sampleRate * 2);
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      const src = ctx.createBufferSource();
+      src.buffer = buf; src.loop = true;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass'; filter.frequency.value = 240; filter.Q.value = 0.6;
+      const gain = ctx.createGain();
+      gain.gain.value = 0.05;
+      const lfo = ctx.createOscillator();
+      lfo.type = 'sine'; lfo.frequency.value = 0.13;
+      const lfoGain = ctx.createGain();
+      lfoGain.gain.value = 90; // filter wobble ±90Hz (wind/traffic swell)
+      lfo.connect(lfoGain); lfoGain.connect(filter.frequency);
+      src.connect(filter); filter.connect(gain); gain.connect(this.master);
+      src.start(); lfo.start();
+      this.ambienceNodes = { src, filter, gain, lfo, lfoGain };
+      // slow swell timer (single guarded interval): breathe the bed gain
+      let t = 0;
+      this.ambienceTimer = window.setInterval(() => {
+        if (!this.ambienceNodes || this.muted) return;
+        t += 0.8;
+        this.ambienceNodes.gain.gain.value = 0.045 + Math.sin(t * 0.4) * 0.015;
+      }, 800);
+    } catch { this.ambienceNodes = null; }
+  }
+  stopAmbience(): void {
+    if (this.ambienceTimer !== null) { clearInterval(this.ambienceTimer); this.ambienceTimer = null; }
+    const n = this.ambienceNodes;
+    this.ambienceNodes = null;
+    if (!n) return;
+    try {
+      n.lfo.stop(); n.src.stop();
+    } catch { /* already stopped */ }
+    try {
+      n.lfo.disconnect(); n.lfoGain.disconnect(); n.src.disconnect(); n.filter.disconnect(); n.gain.disconnect();
+    } catch { /* already disconnected */ }
+  }
+  /** Background/visibility hooks (central calls on visibilitychange). Safe without ctx. */
+  suspend(): void { try { void this.ctx?.suspend(); } catch { /* ignore */ } }
+  resume(): void { try { if (this.ctx && this.ctx.state === 'suspended') void this.ctx.resume(); } catch { /* ignore */ } }
 }

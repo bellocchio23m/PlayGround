@@ -8,10 +8,13 @@ export interface SaveData {
   missionsDone: string[];
   xp: number;
   upgrades: Record<string, number>;
-  inventory: { smoke: number; knives: number; relic: boolean; doc: boolean };
-  settings: { volume: number; quality: 'low' | 'med' | 'high'; invertY: boolean; cameraSens: number; lefty: boolean; uiScale: number; minimap: boolean };
+  inventory: { smoke: number; knives: number; relic: boolean; doc: boolean; lure: number };
+  settings: { volume: number; quality: 'low' | 'med' | 'high'; invertY: boolean; cameraSens: number; lefty: boolean; uiScale: number; minimap: boolean; layout: 'default' | 'compact' | 'large'; minimapZoom: 1 | 2 | 3 };
   checkpoint: { x: number; y: number; z: number; missionId: string } | null;
   bestGhost: Record<string, boolean>;
+  worldFlags: Record<string, boolean>;
+  stats: { kills: number; ghosts: number; deaths: number; playTime: number };
+  unlockedSpecial: boolean;
 }
 
 const SLOT_KEY = (i: number): string => `shadowline-slot-${i}`;
@@ -23,9 +26,12 @@ export function defaultSave(slot = 0): SaveData {
   return {
     v: 2, slot, updatedAt: Date.now(),
     missionIndex: 0, missionsDone: [], xp: 0, upgrades: {},
-    inventory: { smoke: 2, knives: 3, relic: false, doc: false },
-    settings: { volume: 0.8, quality: 'med', invertY: false, cameraSens: 1, lefty: false, uiScale: 1, minimap: true },
+    inventory: { smoke: 2, knives: 3, relic: false, doc: false, lure: 1 },
+    settings: { volume: 0.8, quality: 'med', invertY: false, cameraSens: 1, lefty: false, uiScale: 1, minimap: true, layout: 'default' as const, minimapZoom: 1 as const },
     checkpoint: null, bestGhost: {},
+    worldFlags: {},
+    stats: { kills: 0, ghosts: 0, deaths: 0, playTime: 0 },
+    unlockedSpecial: false,
   };
 }
 
@@ -42,6 +48,9 @@ function parse(raw: string | null): SaveData | null {
       upgrades: (p.upgrades ?? {}) as Record<string, number>,
       missionsDone: Array.isArray(p.missionsDone) ? p.missionsDone : [],
       bestGhost: (p.bestGhost ?? {}) as Record<string, boolean>,
+      worldFlags: { ...(p.worldFlags ?? {}) } as Record<string, boolean>,
+      stats: { ...d.stats, ...((p.stats ?? {}) as object) } as SaveData['stats'],
+      unlockedSpecial: (p.unlockedSpecial ?? false) as boolean,
     };
     if (merged.v !== 2) return migrate(merged);
     return merged;
@@ -63,6 +72,9 @@ function migrate(p: SaveData): SaveData {
     settings: { ...d.settings, ...(p.settings ?? {}) },
     checkpoint: p.checkpoint ?? null,
     bestGhost: p.bestGhost ?? {},
+    worldFlags: { ...(p.worldFlags ?? {}) },
+    stats: { ...d.stats, ...((p.stats ?? {}) as object) },
+    unlockedSpecial: p.unlockedSpecial ?? false,
   };
 }
 
@@ -125,6 +137,31 @@ export class SaveSystem {
   }
 
   wipe(): void { this.data = defaultSave(this.slotIndex); this.save(); }
+
+  /** Death/retry persistence: increments deaths and saves (central calls on death). */
+  saveDie(): void {
+    this.data.stats.deaths += 1;
+    this.save();
+  }
+
+  /** Post-mission stats: record a completed mission (ghost bonus + xp already applied by caller). */
+  saveMissionComplete(missionId: string, ghost: boolean, xp: number): void {
+    if (!this.data.missionsDone.includes(missionId)) this.data.missionsDone.push(missionId);
+    this.data.xp += xp;
+    if (ghost) this.data.stats.ghosts += 1;
+    this.data.bestGhost[missionId] = (this.data.bestGhost[missionId] ?? true) && ghost;
+    this.save();
+  }
+
+  /** Small safe stat helpers (central calls on kills/ghosts/deaths). */
+  bumpStat(k: 'kills' | 'ghosts' | 'deaths', n = 1): void {
+    this.data.stats[k] += n;
+  }
+
+  /** Accumulate play time (seconds); caller saves periodically via update()/save(). */
+  addPlayTime(dt: number): void {
+    if (Number.isFinite(dt) && dt > 0) this.data.stats.playTime += dt;
+  }
 
   /** autosave every 20s (caller also saves on mission events). */
   update(dt: number): void {

@@ -2,12 +2,20 @@
 // progression, settings, mission tracker, damage vignette, prompts.
 import { InputManager } from '../input/input';
 
+export type LayoutPreset = 'default' | 'compact' | 'large';
+
 export class UI {
   root: HTMLElement;
   els: Record<string, HTMLElement> = {};
   promptT = 0;
   dmgT = 0;
   onAction: (a: string) => void = () => undefined;
+  /** minimap zoom level (central drawMinimap reads this; 1=wide, 3=tight) */
+  minimapZoom: 1 | 2 | 3 = 1;
+  layout: LayoutPreset = 'default';
+  private stealthTierCache = -1;
+  private stealthLabelCache = '';
+  private flashTimers = new Map<string, number>();
 
   constructor(private input: InputManager) {
     this.root = document.getElementById('ui')!;
@@ -84,6 +92,8 @@ export class UI {
         ${this.btn('t-assass', 'ASS', 'border-color:var(--acc)')}
         ${this.btn('t-interact', 'USA', '')}
         ${this.btn('t-smoke', 'FUMO', '')}
+        ${this.btn('t-lure', 'ESCA', '')}
+        ${this.btn('t-special', 'FALCE', 'border-color:var(--acc)')}
       </div>
       <div id="sys-row" style="position:absolute;left:10px;top:calc(120px + env(safe-area-inset-top));display:flex;gap:8px;pointer-events:auto">
         ${this.btn('t-sprint', 'CORSA', '')}
@@ -122,8 +132,10 @@ export class UI {
     const tap = (id: string, fn: () => void): void => {
       const el = this.els[id] ?? this.root.querySelector<HTMLElement>('#' + id);
       if (!el) return;
-      el.addEventListener('touchstart', (e) => { e.preventDefault(); fn(); }, { passive: false });
-      el.addEventListener('mousedown', (e) => { e.preventDefault(); fn(); });
+      this.els[id] = el;
+      const fire = (e: Event): void => { e.preventDefault(); fn(); this.flashButton(id); };
+      el.addEventListener('touchstart', fire as EventListener, { passive: false });
+      el.addEventListener('mousedown', fire as EventListener);
     };
     tap('t-jump', () => this.input.tap('jump'));
     tap('t-attack', () => this.input.tap('attack'));
@@ -134,6 +146,8 @@ export class UI {
     tap('t-assass', () => this.input.tap('assassinate'));
     tap('t-interact', () => this.input.tap('interact'));
     tap('t-smoke', () => this.input.tap('smoke'));
+    tap('t-lure', () => this.input.tap('lure'));
+    tap('t-special', () => this.input.tap('special'));
     tap('t-sprint', () => { this.input.state.sprint = !this.input.state.sprint; });
     tap('t-knife', () => this.input.tap('knife'));
     tap('t-pause', () => this.input.tap('pause'));
@@ -255,6 +269,89 @@ export class UI {
     el.prepend(d);
     while (el.children.length > 4) el.lastChild?.remove();
     window.setTimeout(() => d.remove(), 4000);
+  }
+  /** Button layout presets: resize/reposition act-grid + sys-row. Persist via save settings.layout. */
+  setLayoutPreset(p: LayoutPreset): void {
+    this.layout = p;
+    const grid = this.root.querySelector<HTMLElement>('#act-grid');
+    const sys = this.root.querySelector<HTMLElement>('#sys-row');
+    if (!grid) return;
+    const cfg = {
+      default: { cols: 64, gap: 8, bottom: 24, right: 10, font: 15 },
+      compact: { cols: 52, gap: 6, bottom: 12, right: 6, font: 13 },
+      large: { cols: 76, gap: 10, bottom: 28, right: 12, font: 16 },
+    }[p];
+    grid.style.gridTemplateColumns = `repeat(3,${cfg.cols}px)`;
+    grid.style.gap = `${cfg.gap}px`;
+    grid.style.bottom = `calc(${cfg.bottom}px + env(safe-area-inset-bottom))`;
+    grid.style.right = `${cfg.right}px`;
+    for (const b of Array.from(grid.querySelectorAll<HTMLElement>('button'))) {
+      b.style.minWidth = `${cfg.cols}px`;
+      b.style.minHeight = p === 'compact' ? '42px' : p === 'large' ? '56px' : '48px';
+      b.style.fontSize = `${cfg.font}px`;
+      b.style.padding = p === 'compact' ? '6px 8px' : '10px 14px';
+    }
+    if (sys) {
+      sys.style.top = p === 'compact' ? 'calc(96px + env(safe-area-inset-top))' : 'calc(120px + env(safe-area-inset-top))';
+      for (const b of Array.from(sys.querySelectorAll<HTMLElement>('button'))) {
+        b.style.fontSize = `${cfg.font}px`;
+        b.style.minHeight = p === 'compact' ? '40px' : '48px';
+      }
+    }
+  }
+  /** Pick compact automatically on short screens (central calls on resize). Returns applied preset. */
+  autoLayout(): LayoutPreset {
+    const short = window.innerHeight < 500 || window.innerWidth <= 360;
+    const p: LayoutPreset = short ? 'compact' : 'default';
+    this.setLayoutPreset(p);
+    return p;
+  }
+  /** Stealth suspicion tier badge near detection icon. Throttle-friendly: DOM writes only on change. */
+  setStealthTier(tier: 0 | 1 | 2, label: string): void {
+    if (tier === this.stealthTierCache && label === this.stealthLabelCache) return;
+    this.stealthTierCache = tier;
+    this.stealthLabelCache = label;
+    let el = this.root.querySelector<HTMLElement>('#stealth-tier');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'stealth-tier';
+      el.setAttribute('style', 'position:absolute;top:calc(46px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);font-size:11px;letter-spacing:1px;color:#8fa3c1;background:rgba(10,14,20,.7);border:1px solid #3a4a63;padding:3px 10px;border-radius:10px;display:none;white-space:nowrap');
+      this.els['hud']?.appendChild(el);
+    }
+    if (tier === 0 && !label) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    const segs = tier === 0 ? '○○○' : tier === 1 ? '●●○' : '●●●';
+    const color = tier === 0 ? '#8fa3c1' : tier === 1 ? '#ffb45e' : '#e63946';
+    const txt = `${segs} ${label}`;
+    if (el.textContent !== txt) el.textContent = txt;
+    if (el.style.color !== color) el.style.color = color;
+    el.style.borderColor = color;
+  }
+  /** Mission tracker with optional survive timer. setObjectives() keeps working independently. */
+  setTracker(title: string, lines: string[], cur: number, timer?: string): void {
+    const el = this.els['objectives'];
+    if (!el) return;
+    const body = `<div style="color:#8fa3c1;font-size:11px;letter-spacing:2px">${title}</div>` +
+      lines.map((o, i) => `<div style="color:${i < cur ? '#5b6b85;text-decoration:line-through' : i === cur ? '#fff' : '#8fa3c1'}">${i < cur ? '✓' : i === cur ? '▸' : '·'} ${o}</div>`).join('');
+    const t = timer !== undefined ? `<div style="margin-top:4px;color:#ffd98a;font-size:13px;font-weight:700">⏱ ${timer}</div>` : '';
+    const html = body + t;
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+  /** Minimap zoom store (central drawMinimap reads minimapZoom). */
+  setMinimapZoom(z: 1 | 2 | 3): void { this.minimapZoom = z; }
+  /** Visual active-state flash on tap (central may call; auto-called by touch bindings). */
+  flashButton(id: string): void {
+    const el = this.els[id] ?? this.root.querySelector<HTMLElement>('#' + id);
+    if (!el) return;
+    el.style.filter = 'brightness(1.8)';
+    el.style.borderColor = '#e63946';
+    const prev = this.flashTimers.get(id);
+    if (prev) window.clearTimeout(prev);
+    this.flashTimers.set(id, window.setTimeout(() => {
+      el.style.filter = '';
+      el.style.borderColor = '';
+      this.flashTimers.delete(id);
+    }, 120));
   }
   updateVignette(dt: number, hp: number, hpMax: number): void {
     this.dmgT = Math.max(0, this.dmgT - dt * 1.5);
