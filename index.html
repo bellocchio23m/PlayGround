@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>SHADOW OF THE SHOGUN — Stealth Ninja Open World</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗡️</text></svg>">
+<meta name="description" content="Stealth ninja open-world: climb rooftops, assassinate warlords, vanish. Phone / tablet / desktop.">
+<style>
+:root{--accent:#e63946;--gold:#f4a261;--ink:#0b0e14;--paper:#f1fa8c}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#0b0e14;font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial;color:#fff;overscroll-behavior:none;touch-action:none;user-select:none;-webkit-user-select:none}
+#app{position:fixed;inset:0}
+canvas#game{position:absolute;inset:0;width:100%;height:100%;display:block}
+.hud{position:absolute;pointer-events:none;z-index:10}
+#topbar{top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:flex-start;padding:calc(8px + env(safe-area-inset-top)) 10px 0 10px}
+.pill{background:rgba(10,12,18,.62);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(8px);border-radius:999px;padding:7px 12px;font-size:13px;letter-spacing:.04em;display:flex;gap:8px;align-items:center}
+#healthwrap{width:170px;height:10px;background:rgba(255,255,255,.15);border-radius:99px;overflow:hidden}
+#healthbar{height:100%;width:100%;background:linear-gradient(90deg,#e63946,#ff7b7b);transition:width .25s}
+#staminawrap{width:110px;height:6px;background:rgba(255,255,255,.14);border-radius:99px;overflow:hidden;margin-top:4px}
+#staminabar{height:100%;width:100%;background:#7bdff2}
+#eyewrap{position:absolute;left:50%;top:calc(8px + env(safe-area-inset-top));transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px}
+#eye{width:46px;height:46px;border-radius:50%;border:2px solid rgba(255,255,255,.25);display:flex;align-items:center;justify-content:center;font-size:22px;background:rgba(0,0,0,.55);transition:all .2s}
+#eye.hidden{border-color:#7bdff2;box-shadow:0 0 18px #7bdff2}
+#eye.spotted{border-color:var(--accent);box-shadow:0 0 18px var(--accent);animation:pulse .6s infinite alternate}
+@keyframes pulse{from{transform:scale(1)}to{transform:scale(1.12)}}
+#detect{width:84px;height:6px;background:rgba(255,255,255,.15);border-radius:99px;overflow:hidden}
+#detectfill{height:100%;width:0%;background:linear-gradient(90deg,#ffd166,#e63946)}
+#objectives{position:absolute;top:calc(72px + env(safe-area-inset-top));left:10px;max-width:250px;background:rgba(10,12,18,.62);border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:10px 12px;font-size:12.5px;line-height:1.45;pointer-events:none}
+#objectives b{color:var(--gold)}
+#objective-arrow{position:absolute;top:50%;left:50%;width:0;height:0;pointer-events:none;z-index:9}
+#compass{position:absolute;top:calc(72px + env(safe-area-inset-top));right:10px;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+#minimap{width:128px;height:128px;border-radius:50%;border:2px solid rgba(255,255,255,.2);background:rgba(5,7,12,.72);box-shadow:0 4px 24px rgba(0,0,0,.5)}
+#scorepill{font-variant-numeric:tabular-nums}
+#toast{position:absolute;left:50%;top:22%;transform:translateX(-50%);text-align:center;font-size:clamp(18px,4vw,34px);font-weight:800;letter-spacing:.06em;text-shadow:0 2px 20px #000;opacity:0;transition:opacity .4s;white-space:nowrap}
+#prompt{position:absolute;left:50%;bottom:210px;transform:translateX(-50%);background:rgba(244,162,97,.95);color:#1a1a1a;font-weight:800;padding:10px 18px;border-radius:999px;font-size:15px;display:none;pointer-events:none;box-shadow:0 4px 20px rgba(0,0,0,.4);white-space:nowrap;z-index:20}
+#killfeed{position:absolute;left:10px;bottom:170px;display:flex;flex-direction:column;gap:6px;font-size:13px}
+.killmsg{background:rgba(0,0,0,.6);border-left:3px solid var(--accent);padding:6px 10px;border-radius:8px;animation:slidein .3s}
+@keyframes slidein{from{transform:translateX(-20px);opacity:0}to{transform:none;opacity:1}}
+/* touch controls */
+#touchUI{position:absolute;inset:0;pointer-events:none;z-index:15}
+#joy{position:absolute;left:18px;bottom:calc(22px + env(safe-area-inset-bottom));width:128px;height:128px;border-radius:50%;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.22);pointer-events:auto;touch-action:none}
+#knob{position:absolute;left:50%;top:50%;width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,.28);border:1.5px solid rgba(255,255,255,.4);transform:translate(-50%,-50%)}
+#lookpad{position:absolute;right:0;top:30%;bottom:0;width:45%;pointer-events:auto;touch-action:none}
+#btns{position:absolute;right:12px;bottom:calc(18px + env(safe-area-inset-bottom));display:grid;grid-template-columns:64px 64px 64px;gap:10px;pointer-events:auto}
+.tbtn{width:64px;height:64px;border-radius:50%;border:1.5px solid rgba(255,255,255,.3);background:rgba(10,12,18,.55);backdrop-filter:blur(6px);color:#fff;font-size:11px;font-weight:800;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1;gap:2px}
+.tbtn span{font-size:20px}
+.tbtn:active{background:rgba(230,57,70,.7)}
+.tbtn.primary{background:rgba(230,57,70,.85);border-color:#fff}
+.tbtn.cool{opacity:.45}
+#eagleBtn.active{background:rgba(123,223,242,.8);color:#000}
+/* menus */
+.screen{position:absolute;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 100% at 50% 0%,#2b1a2e 0%,#0b0e14 60%,#000 100%);padding:18px}
+.card{max-width:620px;width:100%;background:rgba(15,18,28,.88);border:1px solid rgba(244,162,97,.3);border-radius:22px;padding:22px 20px;box-shadow:0 20px 80px rgba(0,0,0,.6);max-height:92vh;overflow:auto}
+.card h1{margin:0;font-size:clamp(28px,6vw,48px);letter-spacing:.04em;line-height:1}
+.card h1 em{color:var(--accent);font-style:normal}
+.sub{color:var(--gold);letter-spacing:.28em;font-size:12px;margin:6px 0 12px;font-weight:700}
+.story{color:#d6d6d6;font-size:14px;line-height:1.6}
+.feats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:14px 0}
+.feat{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:9px 10px;font-size:12.5px}
+.feat b{display:block;font-size:13px}
+.bigbtn{pointer-events:auto;display:block;width:100%;margin-top:10px;padding:15px;border-radius:14px;border:none;font-size:17px;font-weight:900;letter-spacing:.04em;background:linear-gradient(180deg,#e63946,#a41623);color:#fff;cursor:pointer}
+.bigbtn.secondary{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2)}
+.row{display:flex;gap:8px}
+.row .bigbtn{flex:1}
+.ctrls{font-size:12.5px;color:#bbb;line-height:1.7;margin-top:10px}
+.ctrls kbd{background:#222;border:1px solid #444;border-radius:6px;padding:1px 6px;font-size:12px}
+#loadingbar{height:8px;background:#222;border-radius:99px;overflow:hidden;margin-top:12px}
+#loadingfill{height:100%;width:0%;background:var(--gold)}
+#eagleOverlay{position:absolute;inset:0;pointer-events:none;background:radial-gradient(100% 100% at 50% 50%,transparent 40%,rgba(0,180,255,.28) 100%);mix-blend-mode:screen;display:none;z-index:5}
+#vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(90% 90% at 50% 50%,transparent 55%,rgba(0,0,0,.55) 100%);z-index:6}
+#dmgflash{position:absolute;inset:0;background:radial-gradient(red,transparent);opacity:0;pointer-events:none;z-index:7;transition:opacity .2s}
+#synccine{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;background:rgba(255,255,255,.08);backdrop-filter:blur(1px);z-index:30;pointer-events:none}
+#synccine h2{font-size:clamp(24px,6vw,54px);letter-spacing:.3em;margin:0;text-shadow:0 2px 20px #000}
+.hidden{display:none!important}
+@media (min-width:900px){#btns{grid-template-columns:58px 58px 58px 58px}#lookpad{display:none}#joy{opacity:.9}}
+@media (max-height:500px){#objectives{display:none}}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
+</head>
+<body>
+<div id="app">
+<canvas id="game"></canvas>
+<div id="eagleOverlay"></div>
+<div id="vignette"></div>
+<div id="dmgflash"></div>
+<div id="topbar" class="hud">
+<div class="pill"><div><div style="font-weight:900;font-size:13px">🗡️ SHINOBI</div><div id="healthwrap"><div id="healthbar"></div></div><div id="staminawrap"><div id="staminabar"></div></div></div><div id="inv" style="font-size:12px;color:#ffd166">⭐0 &nbsp;🗡️5 🎯5 💨3</div></div>
+<div class="hud" id="eyewrap" style="pointer-events:none"><div id="eye">👁️</div><div id="detect"><div id="detectfill"></div></div><div id="stance" class="pill" style="font-size:11px">STANDING</div></div>
+<div class="pill" id="scorepill">🎯 0/5 &nbsp;•&nbsp; ⏱️ 0:00</div>
+</div>
+<div id="objectives" class="hud">...</div>
+<div id="compass" class="hud"><canvas id="minimap" width="256" height="256"></canvas></div>
+<div id="toast"></div>
+<div id="prompt"></div>
+<div id="killfeed"></div>
+<div id="objective-arrow"></div>
+<div id="touchUI">
+<div id="joy"><div id="knob"></div></div>
+<div id="lookpad"></div>
+<div id="btns">
+<button class="tbtn primary" id="btnAct"><span>⚔️</span>ACT</button>
+<button class="tbtn" id="btnJump"><span>⤴️</span>JUMP</button>
+<button class="tbtn" id="btnCrouch"><span>🐾</span>SNEAK</button>
+<button class="tbtn" id="btnWhistle"><span>🎵</span>WHISTLE</button>
+<button class="tbtn" id="btnShuriken"><span>✦</span>THROW</button>
+<button class="tbtn" id="btnSmoke"><span>💨</span>SMOKE</button>
+<button class="tbtn" id="btnEagle"><span>👁️</span>EAGLE</button>
+<button class="tbtn" id="btnSync"><span>🦅</span>SYNC</button>
+<button class="tbtn" id="btnPause"><span>⏸️</span>MENU</button>
+</div>
+</div>
+<div id="synccine"><h2>SYNCHRONIZED</h2><div style="letter-spacing:.2em">MAP REVEALED • EAGLE STRENGTHENED</div></div>
+<div id="menu" class="screen">
+<div class="card">
+<h1>SHADOW <em>of the</em> SHOGUN</h1>
+<div class="sub">STEALTH • PARKOUR • ASSASSIN OPEN WORLD</div>
+<div class="story">Feudal Japan, 1582. The warlord <b style="color:#ff7b7b">Kuro Daimyo</b> and his 4 captains terrorize the valley. You are the last <b>Shadow Ninja</b>. Climb pagodas and rooftops, hide in cherry bushes and hay, whistle, throw shuriken, and strike unseen. Synchronize the high pagoda to reveal all. Leap of faith from the rooftops.</div>
+<div class="feats">
+<div class="feat"><b>🏯 Open World</b>40+ houses, pagoda, fortress, torii, forest</div>
+<div class="feat"><b>🧗 Parkour</b>Climb any wall • air assassinate • leap of faith</div>
+<div class="feat"><b>👁️ Stealth AI</b>Vision cones, ?, !, whistle & smoke</div>
+<div class="feat"><b>📱 Phone Ready</b>Joystick + buttons, auto-quality</div>
+</div>
+<div id="loadingbar"><div id="loadingfill"></div></div>
+<div class="row"><button class="bigbtn" id="playBtn">▶ &nbsp;INFILTRATE THE VALLEY</button></div>
+<div class="row"><button class="bigbtn secondary" id="qualityBtn">QUALITY: AUTO</button><button class="bigbtn secondary" id="helpBtn">HOW TO PLAY</button></div>
+<div class="ctrls" id="helpText" style="display:none">Desktop: <kbd>WASD</kbd> move • <kbd>Mouse</kbd> look • <kbd>Space</kbd> jump/climb • <kbd>C</kbd> sneak • <kbd>E</kbd> assassinate/loot/sync • <kbd>Q</kbd> whistle • <kbd>F</kbd> shuriken • <kbd>G</kbd> smoke • <kbd>V</kbd> eagle vision • <kbd>Shift</kbd> sprint<br>Phone: left stick move • drag right side to look • ACT = context kill/loot/sync/leap.<br>Tips: crouch in bushes = invisible. Climb: push into wall + jump. Drop from above + ACT = air kill. Yellow <b>?</b> = suspicious, red <b>!</b> = hunted. Sync pagoda 🦅 reveals map.</div>
+</div>
+</div>
+<div id="pause" class="screen hidden"><div class="card"><h1>PAUSED</h1><div class="story" id="pauseStats"></div><div class="row"><button class="bigbtn" id="resumeBtn">RESUME</button></div><div class="row"><button class="bigbtn secondary" id="restartBtn">RESTART</button><button class="bigbtn secondary" id="menuBtn">TITLE</button></div></div></div>
+<div id="end" class="screen hidden"><div class="card"><h1 id="endTitle">LEGEND</h1><div class="sub" id="endSub"></div><div class="story" id="endStats"></div><button class="bigbtn" id="againBtn">PLAY AGAIN</button></div></div>
+</div>
+<script type="module" src="./game.js"></script>
+</body>
+</html>
