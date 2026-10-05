@@ -49,6 +49,18 @@ export function suspicionRate(v: number, dist: number): number {
   return CFG.stealth.suspicionRate * v * closeness;
 }
 
+// ---- corpse hiding (cheap, pure, 10Hz-budget neutral) ----
+// CENTRAL CONTRACT: hidden corpses contribute 0 suspicion — skip them before
+// calling Enemy.seeCorpse (or pass corpse.hidden as its 3rd arg). No per-frame
+// work; this helper is O(1) and called only on corpse-discovery ticks.
+/** suspicion a corpse discovery is worth (hidden -> 0, visible -> 80). */
+export function corpseSuspicion(hidden: boolean): number { return hidden ? 0 : 80; }
+/** whether a corpse at (observer) distance should trigger seeCorpse. */
+export function corpseNotice(dist: number, hidden: boolean): boolean {
+  if (hidden) return false;
+  return dist < CFG.stealth.corpseNoticeDist;
+}
+
 export function canAssassinate(o: {
   dist: number; blocked: boolean; enemyYaw: number; playerYaw: number;
   enemyAlert: boolean; fromAbove: boolean; moving: boolean;

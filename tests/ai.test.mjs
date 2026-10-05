@@ -116,5 +116,46 @@ const zoneCount = (zoneBlock.match(/z:/g) || []).length;
 ok(zoneCount === 4, `civilian: SAFE_ZONES has 4 entries (found ${zoneCount})`);
 ok(!has(civ, 'losBlocked'), 'civilian: still no LOS (cheap)');
 
+console.log('ai/alarm escalation (heat):');
+ok(has(enemy, 'heat: number') || has(enemy, 'heat = 0'), 'enemy: public heat field (0..100)');
+ok(has(enemy, 'heatTier'), 'enemy: heatTier exposed');
+ok(has(enemy, 'HEAT_SPOT') && has(enemy, '25'), 'enemy: HEAT_SPOT +25 on spot');
+ok(has(enemy, 'HEAT_CORPSE') && has(enemy, 'HEAT_SCREAM'), 'enemy: +10 corpse/scream constants');
+ok(has(enemy, 'HEAT_DECAY') && has(enemy, '4'), 'enemy: heat decays 4/s when unseen');
+ok(has(enemy, 'HEAT_HUNTED') && has(enemy, 'HEAT_LOCKDOWN'), 'enemy: hunted/lockdown boundaries exported');
+ok(has(enemy, '30') && has(enemy, '70'), 'enemy: heat tiers calm<30 hunted 30-69 lockdown 70+');
+ok(has(enemy, '* 1.1'), 'enemy: lockdown moveToward speed x1.1');
+ok(has(enemy, '? 0.5 : 1'), 'enemy: lockdown suspicion decay halved');
+ok(has(enemy, 'clamp(this.heat'), 'enemy: heat clamped 0..100');
+
+console.log('ai/corpse hiding:');
+ok(has(enemy, 'hidden = false') || has(enemy, 'hidden=false'), 'enemy: hidden field defaults false');
+ok(has(enemy, 'hideCorpse'), 'enemy: hideCorpse() method');
+ok(has(enemy, 'sunk'), 'enemy: sunk flag for central mesh sink');
+ok(has(enemy, 'corpseHidden'), 'enemy: seeCorpse skips hidden corpses');
+ok(has(enemy, 'hidden -> suspicion contribution 0') || has(enemy, 'suspicion contribution 0'), 'enemy: hidden -> 0 suspicion documented');
+ok(has(perc, 'corpseSuspicion'), 'perception: corpseSuspicion helper');
+ok(has(perc, 'corpseNotice'), 'perception: corpseNotice helper');
+
+console.log('ai/patrol coordination (phaseOffset desync):');
+ok(has(enemy, 'allies?: Enemy[]'), 'enemy: tick() allies param optional (backward compat)');
+ok(has(enemy, 'PATROL_DESYNC_DIST') && has(enemy, 'PATROL_HOLD_S'), 'enemy: desync radius + hold constants');
+ok(has(enemy, '6') && has(enemy, 'a.patrol !== this.patrol'), 'enemy: same patrol-array reference within 6m');
+ok(has(enemy, 'Math.random() < 0.5'), 'enemy: 50%/tick hold chance');
+ok(has(enemy, 'phaseOffset'), 'enemy: phaseOffset field/behavior');
+
+console.log('ai/door-corner unstick (no pathfinding):');
+ok(has(enemy, 'stuckT'), 'enemy: stuckT accumulator');
+ok(has(enemy, 'STUCK_S') && has(enemy, '1.2'), 'enemy: stuck threshold 1.2s');
+ok(has(enemy, 'SIDESTEP_S') && has(enemy, 'SIDESTEP_D'), 'enemy: sidestep 2m / 1s fallback constants');
+ok(has(enemy, 'sidestep'), 'enemy: sidestep waypoint field');
+
+console.log('ai/ranger fairness (volley cap):');
+ok(has(enemy, 'rangedHeat'), 'enemy: rangedHeat counter incremented on throw');
+ok(has(enemy, 'lastThrowT'), 'enemy: lastThrowT timestamp for volley window');
+ok(has(enemy, 'RANGER_VOLLEY_WINDOW') && has(enemy, 'RANGER_VOLLEY_DELAY') && has(enemy, 'RANGER_VOLLEY_CAP'), 'enemy: volley window/delay/cap constants');
+ok(has(enemy, 'volleyBlocked'), 'enemy: volleyBlocked allies loop');
+ok(has(enemy, 'RANGER_VOLLEY_DELAY'), 'enemy: own throw delayed +1.5s on cap');
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

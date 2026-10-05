@@ -49,6 +49,36 @@ export const BRUTE_CHARGE_MIN = 6;
 export const BRUTE_CHARGE_MAX = 12;
 /** vertical gap above which ground enemies wait below instead of pushing walls. */
 export const UNREACHABLE_DY = 3;
+// ---- alarm escalation (heat): cheap, in-tick only, no per-frame work ----
+/** heat gained on a live spot (suspicion >= alertThreshold). */
+export const HEAT_SPOT = 25;
+/** heat gained on corpse discovery / scream-noise heard. */
+export const HEAT_CORPSE = 10;
+export const HEAT_SCREAM = 10;
+/** heat decay per second while the player is unseen (vis <= 0.02). */
+export const HEAT_DECAY = 4;
+/** heatTier boundaries: calm <30, hunted 30-69, lockdown 70+. */
+export const HEAT_HUNTED = 30;
+export const HEAT_LOCKDOWN = 70;
+// ---- door/corner unstick fallback (no pathfinding, in-tick only) ----
+/** seconds without approaching the moveToward target before sidestepping. */
+export const STUCK_S = 1.2;
+/** seconds spent driving to the sidestep waypoint. */
+export const SIDESTEP_S = 1.0;
+/** perpendicular offset (meters) for the sidestep waypoint. */
+export const SIDESTEP_D = 2;
+// ---- patrol coordination (phaseOffset desync, no clumping) ----
+/** neighbor radius for patrol desync (meters). */
+export const PATROL_DESYNC_DIST = 6;
+/** hold time when desyncing (seconds). */
+export const PATROL_HOLD_S = 1;
+// ---- ranger fairness (volley cap via allies param) ----
+/** allies' throws newer than this window (s) count toward the volley cap. */
+export const RANGER_VOLLEY_WINDOW = 2;
+/** own-throw delay (s) when the volley cap is hit. */
+export const RANGER_VOLLEY_DELAY = 1.5;
+/** max allies recently thrown before we hold (i.e. delay when >= CAP). */
+export const RANGER_VOLLEY_CAP = 2;
 
 export type EnemyKind = 'guard' | 'elite' | 'captain' | 'brute' | 'ranger';
 
@@ -125,6 +155,34 @@ export class Enemy {
   combatT = 0;
   parryable = false;
   marker: THREE.Sprite | null = null;
+  // ---- alarm escalation: 0..100 squad heat. +25 spot, +10 corpse/scream,
+  // decays 4/s while unseen. heatTier: 0 calm (<30), 1 hunted (30-69),
+  // 2 lockdown (70+). Lockdown: moveToward speed *1.1, suspicion decay halved.
+  // CENTRAL: read heat/heatTier for UI + spawn pressure. Cheap, in-tick only.
+  heat = 0;
+  get heatTier(): 0 | 1 | 2 { return this.heat >= HEAT_LOCKDOWN ? 2 : this.heat >= HEAT_HUNTED ? 1 : 0; }
+  // ---- corpse hiding: hidden=true means this body's corpse is concealed
+  // (player dragged/hid it). CENTRAL CONTRACT: skip hidden corpses when
+  // broadcasting seeCorpse (pass corpse.hidden as 3rd arg or pre-filter);
+  // hidden -> suspicion contribution 0. syncVisual sets sunk=true so central
+  // can sink the mesh (no rendering work here). Use hideCorpse() to set.
+  hidden = false;
+  /** set true by syncVisual once a hidden corpse is sunk (central reads it). */
+  sunk = false;
+  /** patrol desync seed/phase (0..1). Desync hold itself reuses Idle+waitT. */
+  phaseOffset = Math.random();
+  // ---- door/corner unstick fallback (no pathfinding) ----
+  /** seconds the current moveToward target has not been approached. */
+  stuckT = 0;
+  private stuckLast = -1;
+  /** remaining sidestep time (0 = inactive). */
+  sidestepT = 0;
+  sidestep = new THREE.Vector3();
+  // ---- ranger fairness: volley cap via allies param ----
+  /** total knives this enemy has released (fairness counter, central-readable). */
+  rangedHeat = 0;
+  /** `now` (s) of the last knife release; allies check now-lastThrowT < 2s. */
+  lastThrowT = -99;
 
   constructor(kind: EnemyKind, patrol: THREE.Vector3[]) {
     this.kind = kind;
@@ -153,6 +211,8 @@ export class Enemy {
     const d = Math.hypot(n.x - this.pos.x, n.z - this.pos.z);
     if (d > n.radius) return;
     this.investigate.set(n.x, 0, n.z);
+    // scream/loud noise heard: alarm escalation +10 heat.
+    this.heat = clamp(this.heat + HEAT_SCREAM, 0, 100);
     if (this.state === AIState.Patrol || this.state === AIState.Idle || this.state === AIState.Returning) {
       this.state = AIState.Suspicious;
       this.suspicion = Math.max(this.suspicion, 35);
@@ -161,7 +221,13 @@ export class Enemy {
     }
   }
 
-  seeCorpse(x: number, z: number): void {
+  /**
+   * Corpse discovery. CENTRAL: skip hidden corpses — either pre-filter with
+   * `if (!corpse.hidden)` or pass `corpse.hidden` as `corpseHidden`.
+   * Hidden corpses contribute 0 suspicion (skipped here).
+   */
+  seeCorpse(x: number, z: number, corpseHidden = false): void {
+    if (corpseHidden) return; // hidden body: suspicion contribution 0
     if (this.dead || this.inCombat) return;
     const d = Math.hypot(x - this.pos.x, z - this.pos.z);
     if (d < CFG.stealth.corpseNoticeDist && !this.seen) {
@@ -172,8 +238,12 @@ export class Enemy {
       this.corpseT = CORPSE_SEARCH_S; // 4s spiral around the body, then give up
       this.state = AIState.Investigating;
       this.suspicion = 80;
+      this.heat = clamp(this.heat + HEAT_CORPSE, 0, 100);
     }
   }
+
+  /** conceal this enemy's corpse: future seeCorpse broadcasts skip it (0 suspicion). */
+  hideCorpse(): void { this.hidden = true; }
 
   takeDamage(dmg: number, fromYaw: number, heavy: boolean, audio: AudioEngine): boolean {
     if (this.dead) return false;
@@ -210,6 +280,8 @@ export class Enemy {
   private spot(now: number, onSpotted: (e: Enemy) => void): void {
     void now;
     this.state = AIState.Alert;
+    // live spot: alarm escalation +25 heat (clamped 0..100).
+    this.heat = clamp(this.heat + HEAT_SPOT, 0, 100);
     if (this.calloutT <= 0) {
       this.calloutT = CALLOUT_CD_S;
       onSpotted(this);
@@ -240,7 +312,7 @@ export class Enemy {
    * Central spawns the projectile VFX from throwFrom->throwTarget and applies
    * RANGER_THROW_DMG on hit, then resets threwKnife=false.
    */
-  private tickThrow(dt: number, player: PlayerRef, vis: number, audio: AudioEngine, cdMin: number, cdMax: number): void {
+  private tickThrow(dt: number, player: PlayerRef, vis: number, audio: AudioEngine, cdMin: number, cdMax: number, now: number): void {
     if (this.throwTele <= 0) return;
     this.throwTele -= dt;
     this.face(this.lastKnown, 8, dt); // aim at the remembered position (no magic tracking)
@@ -250,13 +322,40 @@ export class Enemy {
       this.throwFrom.set(this.pos.x, this.pos.y + 1.4, this.pos.z);
       this.throwTarget.set(this.lastKnown.x, this.lastKnown.y + 1.2, this.lastKnown.z);
       void player;
+      this.rangedHeat += 1;
+      this.lastThrowT = now;
       this.knifeCD = cdMin + Math.random() * (cdMax - cdMin);
       audio.swoosh();
     }
   }
 
-  /** staggered brain tick (10Hz). Rendering/pose runs every frame in updateVisual. */
-  tick(dt: number, now: number, player: PlayerRef, world: World, audio: AudioEngine, onSpotted: (e: Enemy) => void, onLost: (e: Enemy) => void): void {
+  /**
+   * Ranger fairness volley cap: if >= RANGER_VOLLEY_CAP allies threw within
+   * RANGER_VOLLEY_WINDOW (2s), hold our throw (caller delays knifeCD by
+   * RANGER_VOLLEY_DELAY). Indexed loop over positions/timestamps only, no allocs.
+   */
+  private volleyBlocked(now: number, allies?: Enemy[]): boolean {
+    if (!allies) return false;
+    let n = 0;
+    for (let i = 0; i < allies.length; i++) {
+      const a = allies[i];
+      if (a === this || !a || a.dead) continue;
+      if (now - a.lastThrowT < RANGER_VOLLEY_WINDOW) {
+        n++;
+        if (n >= RANGER_VOLLEY_CAP) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Staggered brain tick (10Hz). Rendering/pose runs every frame in updateVisual.
+   * COST: same 10Hz budget as before — heat/stuck/desync/volley are O(1) or a
+   * single indexed allies loop only on throw-gate / patrol ticks, no per-frame work.
+   * @param allies optional neighbor list for patrol desync + ranger volley cap.
+   *   Backward compat: omit (= undefined) to keep legacy solo behavior.
+   */
+  tick(dt: number, now: number, player: PlayerRef, world: World, audio: AudioEngine, onSpotted: (e: Enemy) => void, onLost: (e: Enemy) => void, allies?: Enemy[]): void {
     if (this.dead) return;
     this.atkCD -= dt; this.hitT -= dt; this.stagger -= dt;
     this.calloutT -= dt;
@@ -294,8 +393,10 @@ export class Enemy {
       if (this.inCombat) { this.lastKnown.copy(player.pos); this.lastKnownT = now; this.lostT = 0; }
     } else {
       this.unseenT += dt;
-      const decay = CFG.stealth.decayRate * (player.hidden ? 3 : 1) * dt;
+      // lockdown halves suspicion decay; heat itself decays 4/s while unseen.
+      const decay = CFG.stealth.decayRate * (player.hidden ? 3 : 1) * (this.heatTier === 2 ? 0.5 : 1) * dt;
       this.suspicion = Math.max(0, this.suspicion - decay);
+      this.heat = Math.max(0, this.heat - HEAT_DECAY * dt);
       if (this.state === AIState.Suspicious && this.suspicion <= 0) this.state = AIState.Patrol;
     }
     // UI readability tier (0 calm <35, 1 curious 35-69, 2 alarmed 70+).
@@ -318,6 +419,24 @@ export class Enemy {
         if (this.waitT <= 0) { this.state = AIState.Patrol; }
         break;
       case AIState.Patrol: {
+        // phaseOffset desync: same patrol-array reference + same waypoint + <6m
+        // = clump risk. 50%/tick chance to hold 1s (Idle) so walkers unclump.
+        // Indexed loop over positions only, no allocs; allies undefined = legacy.
+        if (allies) {
+          for (let i = 0; i < allies.length; i++) {
+            const a = allies[i];
+            if (a === this || !a || a.dead) continue;
+            if (a.patrol !== this.patrol || a.wpIndex !== this.wpIndex) continue;
+            const ax = a.pos.x - this.pos.x; const az = a.pos.z - this.pos.z;
+            if (ax * ax + az * az < PATROL_DESYNC_DIST * PATROL_DESYNC_DIST) {
+              if (Math.random() < 0.5) {
+                this.state = AIState.Idle; this.waitT = PATROL_HOLD_S;
+              }
+              break; // one neighbor check per tick is enough (cheap)
+            }
+          }
+          if (this.state !== AIState.Patrol) break;
+        }
         const wp = this.patrol[this.wpIndex % this.patrol.length];
         if (this.moveToward(wp, this.speed * 0.45, dt, world)) {
           this.wpIndex = (this.wpIndex + 1) % this.patrol.length;
@@ -394,7 +513,7 @@ export class Enemy {
         if (this.backoffT > 0) {
           this.backoffT -= dt;
           this.moveToward(this.fallback, this.speed, dt, world);
-          this.tickThrow(dt, player, vis, audio, ELITE_THROW_CD_MIN, ELITE_THROW_CD_MAX);
+          this.tickThrow(dt, player, vis, audio, ELITE_THROW_CD_MIN, ELITE_THROW_CD_MAX, now);
           break;
         }
         if (this.kind === 'ranger') {
@@ -419,11 +538,13 @@ export class Enemy {
             this.moveToward(_tmp, this.speed * 0.4, dt, world);
           }
           // knife cadence (2.5-3.5s) with 0.7s telegraph; only at seen targets.
-          this.tickThrow(dt, player, vis, audio, RANGER_THROW_CD_MIN, RANGER_THROW_CD_MAX);
+          // volley cap: if >=2 allies threw in the last 2s, delay +1.5s.
+          this.tickThrow(dt, player, vis, audio, RANGER_THROW_CD_MIN, RANGER_THROW_CD_MAX, now);
           if (this.throwTele <= 0) {
             this.knifeCD -= dt;
             if (this.knifeCD <= 0 && vis > 0.02 && dist > 3 && dist < 20) {
-              this.throwTele = RANGER_THROW_TELEGRAPH;
+              if (this.volleyBlocked(now, allies)) this.knifeCD = RANGER_VOLLEY_DELAY;
+              else this.throwTele = RANGER_THROW_TELEGRAPH;
             }
           }
         } else if (this.kind === 'brute') {
@@ -479,10 +600,13 @@ export class Enemy {
           this.face(this.lastKnown, 6, dt);
           this.searchT = 0; this.ringT = 0;
           if (this.kind === 'ranger') {
-            this.tickThrow(dt, player, vis, audio, RANGER_THROW_CD_MIN, RANGER_THROW_CD_MAX);
+            this.tickThrow(dt, player, vis, audio, RANGER_THROW_CD_MIN, RANGER_THROW_CD_MAX, now);
             if (this.throwTele <= 0) {
               this.knifeCD -= dt;
-              if (this.knifeCD <= 0 && vis > 0.02 && dist < 20) this.throwTele = RANGER_THROW_TELEGRAPH;
+              if (this.knifeCD <= 0 && vis > 0.02 && dist < 20) {
+                if (this.volleyBlocked(now, allies)) this.knifeCD = RANGER_VOLLEY_DELAY;
+                else this.throwTele = RANGER_THROW_TELEGRAPH;
+              }
             }
           }
           break;
@@ -515,10 +639,48 @@ export class Enemy {
     }
   }
 
+  /**
+   * Collision-aware step (world.collideCircle) + door/corner unstick fallback:
+   * if the target is not approached for STUCK_S (1.2s), drive a perpendicular
+   * sidestep waypoint (2m) for SIDESTEP_S (1s). No pathfinding. Lockdown
+   * (heatTier 2) moves 1.1x. Resets stuck tracking on arrival.
+   */
   private moveToward(t: THREE.Vector3, speed: number, dt: number, world: World): boolean {
+    if (this.heatTier === 2) speed *= 1.1; // lockdown hustle
+    // active sidestep: drive to the fallback point for 1s (inline, no recursion).
+    if (this.sidestepT > 0) {
+      this.sidestepT -= dt;
+      const sx = this.sidestep.x - this.pos.x; const sz = this.sidestep.z - this.pos.z;
+      const sd = Math.hypot(sx, sz);
+      if (sd < 0.6 || this.sidestepT <= 0) {
+        this.sidestepT = 0; this.stuckT = 0; this.stuckLast = -1;
+        return false;
+      }
+      const tyaw = Math.atan2(sx, sz);
+      this.yaw = dampAngle(this.yaw, tyaw + Math.PI, 6, dt);
+      const sstep = Math.min(sd, speed * dt);
+      this.pos.x += (sx / sd) * sstep; this.pos.z += (sz / sd) * sstep;
+      world.collideCircle(this.pos, 0.4, 1.4);
+      this.pos.y = world.groundHeight(this.pos.x, this.pos.z);
+      this.moveAmt = Math.min(1, this.moveAmt + dt * 4);
+      return false;
+    }
     const dx = t.x - this.pos.x; const dz = t.z - this.pos.z;
     const d = Math.hypot(dx, dz);
-    if (d < 0.6) { this.moveAmt *= 0.8; return true; }
+    if (d < 0.6) { this.moveAmt *= 0.8; this.stuckT = 0; this.stuckLast = -1; return true; }
+    // stuck detection: no meaningful approach (<5cm/tick at 10Hz) accumulates.
+    if (this.stuckLast < 0) { this.stuckLast = d; this.stuckT = 0; }
+    else if (d >= this.stuckLast - 0.05) { this.stuckT += dt; }
+    else { this.stuckT = 0; }
+    this.stuckLast = d;
+    if (this.stuckT >= STUCK_S) {
+      const m = d || 1;
+      const side = (this.id % 2 === 0) ? 1 : -1; // deterministic, no RNG churn
+      this.sidestep.set(this.pos.x + (-dz / m) * SIDESTEP_D * side, 0, this.pos.z + (dx / m) * SIDESTEP_D * side);
+      this.sidestepT = SIDESTEP_S;
+      this.stuckT = 0; this.stuckLast = -1;
+      return false;
+    }
     const tyaw = Math.atan2(dx, dz);
     this.yaw = dampAngle(this.yaw, tyaw + Math.PI, 6, dt);
     const step = Math.min(d, speed * dt);
@@ -534,8 +696,12 @@ export class Enemy {
     this.yaw = dampAngle(this.yaw, tyaw + Math.PI, lambda, dt);
   }
 
-  /** per-frame visual sync (cheap) */
+  /**
+   * Per-frame visual sync (cheap — no AI work here; 10Hz brain owns heat/stuck).
+   * Hidden corpses: sets sunk=true once (central sinks/hides the mesh).
+   */
   syncVisual(dt: number): void {
+    if (this.hidden && this.dead) this.sunk = true; // central reads sunk to sink mesh
     if (this.dead) {
       this.deathT += dt;
       this.animator.animate(this.rig, 'death', 0, dt, { crouch: false, attacking: 0, parry: 0, dodge: 0, dead: true, stagger: 0 });
