@@ -137,12 +137,12 @@ ok(Math.abs(sd2.data.stats.playTime - 12.5) < 1e-9, 'addPlayTime(dt) accumulates
 ok(typeof sd2.saveMissionComplete === 'function', 'saveMissionComplete helper exists');
 
 console.log('service worker (source audit):');
-ok(/'shadowline-v3'/.test(swSrc), 'CACHE name stays v3 (no churn)');
+ok(/'shadowline-v4'/.test(swSrc), 'CACHE name is v4 (clean reinstall for offline-boot fix)');
 ok(/SKIP_WAITING/.test(swSrc) && /addEventListener\('message'/.test(swSrc), 'message handler supports SKIP_WAITING');
 ok(/controllerchange/.test(swSrc), 'controllerchange reload protocol documented');
 ok(/(src\|href)/.test(swSrc), 'precache scrape covers src/href (js/css/fonts)');
 ok(/\.png|EXTRA_BEST_EFFORT/.test(swSrc), 'png icons cached (best-effort, never fails install)');
-ok(/isDoc \? caches\.match/.test(swSrc), 'navigation fallback is doc-only (never JS/CSS MIME breakage)');
+ok(/isDoc \? caches\.match|if \(isDoc\)/.test(swSrc), 'navigation fallback is doc-only (never JS/CSS MIME breakage)');
 
 console.log(`\nux: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -72,6 +72,11 @@ const checks = [
   ['src/ui/ui.ts', 'joy-zone'],   ['src/input/input.ts', 'getGamepads'],
   ['src/world/world.ts', 'losBlocked'], ['src/world/world.ts', 'patrolRoutes'],
   ['public/sw.js', 'caches'], ['public/manifest.webmanifest', 'SHADOWLINE'],
+  // phase 4 device-validation: installable PWA + touch debug
+  ['public/manifest.webmanifest', 'icon-192.png'], ['public/manifest.webmanifest', 'icon-512.png'],
+  ['public/sw.js', 'shadowline-v4'], ['public/sw.js', 'SW_DIAG'],
+  ['src/ui/ui.ts', 'btn-debug'], ['src/ui/ui.ts', 'debug-bench'],
+  ['src/core/game.ts', 'toggleDebug'], ['src/core/game.ts', 'battTxt'],
   // phase 2 systems
   ['src/debug/bench.ts', 'BenchRunner'], ['src/core/config.ts', 'PROFILES'],
   ['src/player/player.ts', 'riposteT'], ['src/player/player.ts', 'landDip'],

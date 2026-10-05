@@ -61,6 +61,7 @@ export class Game {
   private lastCheckpointSave = -99;
   hitstop = 0;
   debugEl: HTMLElement | null = null;
+  battTxt = 'n/a';
   fps = 60; fpsAcc = 0; fpsN = 0; fpsT = 0; frameMs = 0;
   // fx pools (see buildBurstPool/buildSmokePool)
   private smokePuffs: THREE.Mesh[] = [];
@@ -90,7 +91,14 @@ export class Game {
     this.scene.add(this.player.obj);
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
     this.ui = new UI(this.input);
-    this.debugEl = this.ui.els['debug'] ?? null;
+    this.debugEl = this.ui.root.querySelector('#debug-text');
+    // battery level for device validation (level only; temperature NOT exposed by browsers)
+    try {
+      (navigator as unknown as { getBattery?: () => Promise<{ level: number; addEventListener: (t: string, f: () => void) => void }> }).getBattery?.().then((b) => {
+        const upd = (): void => { this.battTxt = `${Math.round(b.level * 100)}%`; };
+        upd(); b.addEventListener('levelchange', upd);
+      }).catch(() => { this.battTxt = 'n/a'; });
+    } catch { this.battTxt = 'n/a'; }
     this.combat = new CombatSystem(this.audio, {
       slash: (at) => this.burst(at, 0xe63946, 14),
       spark: (at) => this.burst(at, 0xffd98a, 18),
@@ -127,7 +135,7 @@ export class Game {
     });
     // keyboard shortcuts for panels/debug/bench
     window.addEventListener('keydown', (e) => {
-      if (e.code === 'F3') { this.debug = !this.debug; if (this.debugEl) this.debugEl.style.display = this.debug ? 'block' : 'none'; }
+      if (e.code === 'F3') this.toggleDebug();
       if (e.code === 'Backquote' && this.screen === 'playing') this.pause();
       if (e.code === 'F4' && this.screen === 'playing') this.runBench();
       if (e.code === 'F5' && this.screen === 'playing') { this.fxOn = !this.fxOn; this.ui.toast(`Particelle ${this.fxOn ? 'ON' : 'OFF'}`); }
@@ -454,6 +462,17 @@ export class Game {
     this.ui.show('pause', false);
   }
 
+  /** touch-accessible debug toggle (pause menu button + F3). */
+  toggleDebug(): void {
+    this.debug = !this.debug;
+    const box = this.ui.root.querySelector<HTMLElement>('#debug');
+    if (box) box.style.display = this.debug ? 'block' : 'none';
+    if (this.debug) {
+      if (this.screen === 'paused') this.resume();
+      this.ui.toast('Debug ON — ▶ BENCH avvia il benchmark');
+    }
+  }
+
   private onDeath(): void {
     if (this.screen !== 'playing') return;
     this.save.saveDie();
@@ -512,6 +531,8 @@ export class Game {
       case 'btn-close-prog': this.ui.show('progression', false); break;
       case 'btn-close-set': this.ui.show('settings', false); break;
       case 'btn-restart': this.ui.show('pause', false); this.startMission(this.missionIndex); break;
+      case 'btn-debug': this.toggleDebug(); break;
+      case 'btn-bench': if (this.screen === 'playing') this.runBench(); else this.ui.toast('Avvia una missione prima del bench'); break;
       case 'btn-quit': case 'btn-quit2': case 'btn-quit3':
         this.screen = 'menu';
         this.ui.show('pause', false); this.ui.show('over', false); this.ui.show('complete', false);
@@ -1318,12 +1339,14 @@ export class Game {
   private renderDebug(): void {
     const r = this.renderer.info;
     const aiSummary = this.enemies.map((e) => `#${e.id}:${e.kind[0]}:${e.state}:${Math.round(e.suspicion)}`).join(' ');
+    const alive = this.enemies.filter((e) => !e.dead).length;
     this.debugEl!.textContent =
       `FPS ${this.fps.toFixed(0)} · ${this.frameMs.toFixed(1)}ms\n` +
       `draw ${r.render.calls} · tris ${(r.render.triangles / 1000).toFixed(1)}k · prog ${(r.programs ?? []).length}\n` +
-      `mem ${(performance as unknown as { memory?: { usedJSHeapSize: number } }).memory ? (((performance as unknown as { memory: { usedJSHeapSize: number } }).memory.usedJSHeapSize / 1048576).toFixed(0) + 'MB') : 'n/a'}\n` +
+      `heap ${(performance as unknown as { memory?: { usedJSHeapSize: number } }).memory ? (((performance as unknown as { memory: { usedJSHeapSize: number } }).memory.usedJSHeapSize / 1048576).toFixed(0) + 'MB') : 'n/a'} · batt ${this.battTxt} · temp n/a\n` +
+      `ent ${alive}E+${this.civilians.length}C · AI ${this.aiMs.toFixed(2)}ms · adapt lv${this.adaptive.level} ${this.adaptive.enabled ? 'on' : 'off'} · Q ${this.save.data.settings.quality}\n` +
       `ply ${this.player.pos.x.toFixed(1)},${this.player.pos.y.toFixed(1)},${this.player.pos.z.toFixed(1)} ${this.player.state}\n` +
-      `AI(${this.enemies.filter((e) => !e.dead).length}) ${aiSummary}\n` +
+      `AI(${alive}) ${aiSummary}\n` +
       `mis ${this.mission?.def.id} obj${this.mission?.objIndex} ghost:${this.mission?.ghost}`;
   }
 }

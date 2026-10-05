@@ -14,7 +14,17 @@
  *   strategy itself changes (avoids churning every user install).
  * Precache coverage: scrape regex below catches src/href incl. .js/.css/fonts;
  * manifest icons (incl. .png like icon-512.png) are cached best-effort too. */
-const CACHE = 'shadowline-v3';
+const CACHE = 'shadowline-v4';
+// Phase-4 diagnostic channel: the SW posts {type:'SW_DIAG',...} to all clients
+// on cache misses and fetch errors (used for offline-boot validation).
+// Pages opt in with: navigator.serviceWorker.addEventListener('message', h).
+function diag(info) {
+  try {
+    self.clients.matchAll({ includeUncontrolled: true }).then((cs) => {
+      cs.forEach((c) => { try { c.postMessage({ type: 'SW_DIAG', ...info }); } catch { /* ignore */ } });
+    });
+  } catch { /* ignore */ }
+}
 const CORE = ['./index.html', './manifest.webmanifest', './icon.svg'];
 // Best-effort extras: referenced by manifest but may not exist in every build.
 // Cached individually with catch() so a missing file NEVER fails install.
@@ -72,16 +82,31 @@ self.addEventListener('fetch', (e) => {
   if (request.method !== 'GET') return;
   const isDoc = request.mode === 'navigate' || request.destination === 'document';
   e.respondWith(
-    caches.match(request, { ignoreSearch: false }).then(
-      (hit) =>
-        hit ||
-        fetch(request).then((res) => {
+    (async () => {
+      try {
+        const hit = await caches.match(request, { ignoreSearch: false });
+        if (hit) return hit;
+        // hardened: retry by raw URL string (covers key-format edge cases)
+        const hit2 = await caches.match(request.url, { ignoreSearch: false });
+        if (hit2) { diag({ ev: 'url-retry-hit', url: request.url }); return hit2; }
+        diag({ ev: 'miss', url: request.url, dest: request.destination, mode: request.mode });
+        try {
+          const res = await fetch(request);
           if (res.ok && new URL(request.url).origin === self.location.origin) {
             const copy = res.clone();
             caches.open(CACHE).then((c) => c.put(request, copy));
           }
           return res;
-        }).catch(() => (isDoc ? caches.match('./index.html') : Promise.reject(new Error('offline'))))
-    )
+        } catch (err) {
+          diag({ ev: 'fetch-err', url: request.url, err: String(err) });
+          if (isDoc) { const doc = await caches.match('./index.html'); if (doc) return doc; }
+          return Promise.reject(new Error('offline'));
+        }
+      } catch (err) {
+        diag({ ev: 'handler-err', url: request.url, err: String(err) });
+        if (isDoc) { const doc = await caches.match('./index.html'); if (doc) return doc; }
+        return Promise.reject(err instanceof Error ? err : new Error('offline'));
+      }
+    })()
   );
 });

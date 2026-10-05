@@ -110,6 +110,7 @@ export class UI {
           ${this.btn('btn-prog', '⬆ Potenziamenti')}
           ${this.btn('btn-set2', '⚙ Impostazioni')}
           ${this.btn('btn-restart', '↻ Riavvia missione')}
+          ${this.btn('btn-debug', '🐞 Debug')}
           ${this.btn('btn-quit', '🏠 Menu')}
         </div>
       </div>
@@ -120,7 +121,7 @@ export class UI {
     <div id="help" style="position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(5,8,12,.8);pointer-events:auto"><div style="background:var(--panel);padding:20px;border-radius:12px;max-width:440px"><h3>? Comandi</h3><div style="font-size:14px;color:#c6d3e6">WASD muovi · Mouse trascina camera · Shift sprint · C accovacciati · Spazio salto/vault · J attacco · K pesante · L parata · U schivata · E interagisci · Q assassinio · G fumogeno · F coltello · Esc pausa.<br><br>Touch: joystick sinistra, trascina destra per la camera.<br>Controller: stick + A salta, X attacco, B schivata, LB parata, Y pesante.</div><div style="margin-top:10px">${this.btn('btn-close-help', 'Chiudi')}</div></div></div>
     <div id="over" style="position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(20,4,8,.85);pointer-events:auto"><div style="text-align:center"><h1 style="color:var(--acc)">SEI CADUTO</h1><div id="over-reason" style="color:#c6d3e6"></div><div style="display:flex;gap:8px;justify-content:center;margin-top:12px">${this.btn('btn-retry', '↻ Riprova dal checkpoint')}${this.btn('btn-quit2', '🏠 Menu')}</div></div></div>
     <div id="complete" style="position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(4,16,8,.85);pointer-events:auto"><div style="text-align:center"><h1 style="color:#7dff9e">MISSIONE COMPLETATA</h1><div id="complete-body" style="color:#c6d3e6"></div><div style="display:flex;gap:8px;justify-content:center;margin-top:12px">${this.btn('btn-next', '▶ Prossima missione')}${this.btn('btn-quit3', '🏠 Menu')}</div></div></div>
-    <div id="debug" style="position:absolute;left:8px;top:38%;font-size:11px;background:rgba(0,0,0,.6);padding:6px 8px;border-radius:6px;display:none;white-space:pre;color:#7dff9e"></div>`;
+    <div id="debug" style="position:absolute;left:8px;top:38%;font-size:11px;background:rgba(0,0,0,.6);padding:6px 8px;border-radius:6px;display:none;white-space:pre;color:#7dff9e;pointer-events:auto"><pre id="debug-text" style="margin:0"></pre><button id="debug-bench" data-act="btn-bench" style="pointer-events:auto;margin-top:4px;background:#1c2940;color:#7dff9e;border:1px solid #3a4a63;border-radius:6px;padding:6px 10px">▶ BENCH</button></div>`;
   }
 
   private bind(): void {
