@@ -32,6 +32,15 @@ export class World {
   /** PHASE-3: noisy generator props. CENTRAL CONTRACT: central masks/attenuates player-generated
    *  NoiseEvents whose source is within ~9m of any entry (sneaking near a generator is safer). */
   generators: THREE.Vector3[] = [];
+  /** PHASE-3b: crawl passages (P7/P8). Low 1.1m gaps under pipes (visual pipe + cheek-wall
+   *  colliders; the corridor itself is walk-through geometry, no blocking collider inside).
+   *  CENTRAL CONTRACT (game.ts/player.ts): while the player capsule is inside `min`/`max`,
+   *  central must treat the player as crawling: force crouch stance (or refuse stand-up),
+   *  apply crouch noise/visibility, and grant the hide-spot LOS bonus. `from`/`to` are the
+   *  two mouths (west->east / north->south) for hint arrows and spawn validity checks.
+   *  - 'crawl-west': alley ovest <-> plaza (mouths (-14.5,0,8) / (-7,0,8)).
+   *  - 'crawl-canal': canale (sud) <-> cortile sud (mouths (33,0,23) / (33,0,30)). */
+  crawlGaps: Array<{ id: string; min: THREE.Vector3; max: THREE.Vector3; from: THREE.Vector3; to: THREE.Vector3 }> = [];
   private ray = new THREE.Raycaster();
   /** PRODUCTION material library: flat-shaded, zero textures, 1 shader family.
    *  TEMPORARY placeholders (to replace with skinned/textured assets later):
@@ -65,6 +74,9 @@ export class World {
     this.hiddenAreas();
     this.breakersAndGenerators();
     this.extraPatrols();
+    this.crawlPassages();
+    this.hideSpots();
+    this.extraCaches();
     this.poisInit();
     this.scene.add(this.group);
   }
@@ -397,6 +409,16 @@ export class World {
   //  P5 north villa doc (m6): (a) terra via cortile, (b) tetti ovest -> NUOVO gate-west bridge, (c) Tetti Alti
   //     NW -> viewpoint drop verso villa, (d) canale -> tetti est -> villa da est.
   //  P6 NW heights garden/attic caches: (a) catena W1->plankW->NW1->NW2->NW3, (b) drop da NW3, (c) alley ovest.
+  //  P7 cunicolo ovest (crawl-west): vicolo ovest (x~-14.5,z8) <-> plaza (x~-7,z8), sotto il tubo,
+  //     solo accovacciato; sbocchi sorvegliati dalla pattuglia mercato ma fuori cono frontale.
+  //  P8 cunicolo canale (crawl-canal): canale sud (33,23) <-> cortile sud (33,30), sotto il tubo,
+  //     solo accovacciato; alternativa stealth all'uscita sud del Vicolo delle Caldaie (P4d).
+  //  HIDE SPOTS (kind 'hide', ids hide-1..3): dumpster con coperchio (plaza), wardrobe (villa),
+  //     thick bush (canale). CENTRAL CONTRACT: interactable riusabile (central NON deve settare
+  //     taken permanente ne nascondere il mesh); finche il player e dentro `radius` + accovacciato,
+  //     central lo considera hidden (come updateHidden: LOS bonus + decay allarmi x3).
+  //  EXTRA CACHES (kind 'cache', ids sotto): cache-nw -> coltelli+2 (cap 8); cache-villa -> fumogeni+2
+  //     (cap 6); cache-deep/cache-stall -> +60 XP via addXp; intel-eco-1/intel-eco-2 -> +60 XP (m9).
   //
   // MICRO-ZONES: (a) Plaza del Mercato (cortile sud + stalli), (b) Vicolo delle Caldaie (canale est
   //  x~33 z[-8,24], pareti alte = corridoio stealth, pipe per uscire), (c) Tetti Alti Nord-Ovest
@@ -694,6 +716,91 @@ export class World {
     P('poi-gen-plaza', 'Generatore Piazza', -9, 0.5, 25.5, 'Frastuono: copre i tuoi rumori se resti vicino.');
     P('poi-gen-alley', 'Generatore Canale', 35, 0.5, 22.5, 'Frastuono: copre i tuoi rumori se resti vicino.');
     P('poi-extract-sud', 'Estrazione Sud', 0, 0, 34, 'Punto di estrazione: semina i nemici prima di sparire.');
+    P('poi-crawl-west', 'Cunicolo Ovest', -11, 0.8, 8, 'Passaggio basso sotto il tubo: solo accovacciato, vicolo <-> plaza.');
+    P('poi-crawl-canal', 'Cunicolo Canale', 33, 0.8, 26.5, 'Passaggio basso sotto il tubo: solo accovacciato, canale <-> cortile.');
+    P('poi-cache-nw', 'Cache Antenna NW', -32, 12.8, -35.5, 'Coltelli sulla piattaforma antenna: sali da W1 con le passerelle.');
+    P('poi-cache-villa', 'Cache Villa Nord', -6, 0.6, -36.5, 'Fumogeni dietro la villa: passa dietro le guardie, basso e piano.');
+    P('poi-cache-deep', 'Cache Canale Profondo', 34.5, 0.6, -5, 'Intel in fondo al vicolo: la pattuglia passa a un soffio.');
+    P('poi-cache-stall', 'Cache Bancarella', 5.5, 1.3, 23, 'Intel nascosta nella bancarella est del mercato.');
+  }
+
+  /** PHASE-3b crawl passages P7/P8: cheek walls (collide) + overhead pipe (visual only,
+   *  shared geometry/material = 2 extra draw calls per passage). The corridor floor stays free
+   *  so existing colliders/ledges/patrols are untouched; crouch enforcement is central's job
+   *  (see `crawlGaps` contract). */
+  private crawlPassages(): void {
+    const M = this.matLib;
+    const pipeGeo = new THREE.CylinderGeometry(0.35, 0.35, 5.4, 10);
+    // P7 alley<->plaza at (-11,0,8), corridor along X (mouths x -13.7 / -8.3, width z 7.1..8.9)
+    this.box(-11, 0.55, 6.9, 5.4, 1.1, 0.4, M.concrete);
+    this.box(-11, 0.55, 9.1, 5.4, 1.1, 0.4, M.concrete);
+    const pipeW = new THREE.Mesh(pipeGeo, M.rustMetal);
+    pipeW.rotation.z = Math.PI / 2;
+    pipeW.position.set(-11, 1.45, 8);
+    this.group.add(pipeW);
+    this.box(-13.2, 0.9, 8, 0.18, 1.8, 0.18, M.metal, false); // support posts (visual)
+    this.box(-8.8, 0.9, 8, 0.18, 1.8, 0.18, M.metal, false);
+    this.crawlGaps.push({
+      id: 'crawl-west',
+      min: new THREE.Vector3(-13.7, 0, 7.1), max: new THREE.Vector3(-8.3, 1.1, 8.9),
+      from: new THREE.Vector3(-14.5, 0, 8), to: new THREE.Vector3(-7, 0, 8),
+    });
+    // P8 canal<->courtyard at (33,0,26.5), corridor along Z (mouths z 23.8 / 29.2, width x 32.1..33.9)
+    this.box(31.9, 0.55, 26.5, 0.4, 1.1, 5.4, M.concrete);
+    this.box(34.1, 0.55, 26.5, 0.4, 1.1, 5.4, M.concrete);
+    const pipeC = new THREE.Mesh(pipeGeo, M.rustMetal);
+    pipeC.rotation.x = Math.PI / 2;
+    pipeC.position.set(33, 1.45, 26.5);
+    this.group.add(pipeC);
+    this.box(33, 0.9, 23.9, 0.18, 1.8, 0.18, M.metal, false); // support posts (visual)
+    this.box(33, 0.9, 29.1, 0.18, 1.8, 0.18, M.metal, false);
+    this.crawlGaps.push({
+      id: 'crawl-canal',
+      min: new THREE.Vector3(32.1, 0, 23.8), max: new THREE.Vector3(33.9, 1.1, 29.2),
+      from: new THREE.Vector3(33, 0, 23), to: new THREE.Vector3(33, 0, 30),
+    });
+  }
+
+  /** PHASE-3b hide spots: dense props + reusable 'hide' interactables (see ledger contract). */
+  private hideSpots(): void {
+    const M = this.matLib;
+    const V = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, y, z);
+    // hide-1: dumpster with propped-open lid near the market maze (plaza)
+    this.box(-9.5, 0.65, 17, 2.0, 1.3, 1.2, M.tarp);
+    const lid = this.box(-9.5, 1.42, 16.85, 2.0, 0.1, 1.1, M.metal, false);
+    this.interactables.push({
+      id: 'hide-1', pos: V(-9.5, 1, 17), radius: 2.8,
+      label: 'Nasconditi (cassonetto)', kind: 'hide', taken: false, mesh: lid,
+    });
+    // hide-2: wardrobe by the villa courtyard (north approach cover)
+    this.box(-8, 1.1, -21, 1.4, 2.2, 0.9, M.crateWood);
+    const doors = this.box(-8, 1.1, -20.52, 1.2, 2.0, 0.06, M.wood, false); // door seam (visual)
+    this.interactables.push({
+      id: 'hide-2', pos: V(-8, 1, -21), radius: 2.8,
+      label: 'Nasconditi (armadio)', kind: 'hide', taken: false, mesh: doors,
+    });
+    // hide-3: thick bush inside the canal corridor (shared geo/mat, no collision)
+    const soilM = this.mat(0x2a2118);
+    this.box(34.8, 0.15, 4, 1.8, 0.3, 1.8, soilM, false);
+    const bushGeo = new THREE.SphereGeometry(0.75, 8, 8);
+    const leaf = new THREE.MeshBasicMaterial({ color: 0x2f6b3a });
+    const b1 = new THREE.Mesh(bushGeo, leaf); b1.position.set(34.4, 0.9, 3.7); this.group.add(b1);
+    const b2 = new THREE.Mesh(bushGeo, leaf); b2.position.set(35.2, 1.0, 4.3); this.group.add(b2);
+    const b3 = new THREE.Mesh(bushGeo, leaf); b3.position.set(34.8, 1.3, 4.0); this.group.add(b3);
+    this.interactables.push({
+      id: 'hide-3', pos: V(34.8, 1, 4), radius: 2.8,
+      label: 'Nasconditi (cespuglio)', kind: 'hide', taken: false, mesh: b3,
+    });
+  }
+
+  /** PHASE-3b exploration rewards (+4 caches) + m9 eco intel. Reward contracts in the ledger. */
+  private extraCaches(): void {
+    this.addCache('cache-nw', 'Coltelli +2 (antenna NW)', -32, 12.85, -35.5, 0xc9a227);
+    this.addCache('cache-villa', 'Fumogeni +2 (villa)', -6, 0.6, -36.5, 0x9aa7bd);
+    this.addCache('cache-deep', 'Intel del canale profondo (+60 XP)', 34.5, 0.6, -5, 0x7dff9e);
+    this.addCache('cache-stall', 'Intel del mercato (+60 XP)', 5.5, 1.3, 23, 0x7dff9e);
+    this.addCache('intel-eco-1', 'Rapporto eco: villa (+60 XP)', -7, 8.0, -32, 0x7dff9e);
+    this.addCache('intel-eco-2', 'Rapporto eco: mercato (+60 XP)', -4, 1.3, 19, 0x7dff9e);
   }
 
   private patrols(): void {

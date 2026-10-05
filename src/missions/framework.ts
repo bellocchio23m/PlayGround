@@ -26,6 +26,11 @@ export interface MissionDef {
   narrative?: string;
   /** (phase-3, additive) Bonus XP central awards on completion when runtime `ghost` is still true. */
   ghostBonusXp?: number;
+  /** (phase-3b, additive) Two suggested approaches shown by central in the briefing UI
+   *  (read-only text, no gameplay logic). Filled for m6/m7/m8/m9; older missions keep
+   *  both approaches inside `briefing` prose. */
+  approachA?: string;
+  approachB?: string;
 }
 
 export interface MissionRuntime {
