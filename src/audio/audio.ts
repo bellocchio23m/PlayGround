@@ -10,18 +10,25 @@ export class AudioEngine {
   muted = false;
   volume = 0.8;
   mood: 'stealth' | 'combat' | 'search' | 'escape' = 'stealth';
+  // CENTRAL WIRING: central sets surface from ground material each frame (or on zone change),
+  // then calls footstepAuto(run) instead of footstep(run, surface).
+  // Mute persistence: central loads save.data.settings.muted → audio.muted → audio.applyMute();
+  // toggling mute must also write back to save.data.settings.muted + save.save().
+  // Wind: central calls whoosh(speed) per frame (sprint/parkour speed); speed<=0.5 stops (gain 0).
+  surface: 'stone' | 'metal' | 'wood' = 'stone';
+  private whooshNodes: { src: AudioBufferSourceNode; filter: BiquadFilterNode; gain: GainNode } | null = null;
 
   setMood(m: 'stealth' | 'combat' | 'search' | 'escape'): void {
     if (this.mood !== m) { this.mood = m; this.step = 0; }
   }
 
   ensure(): void {
-    if (this.ctx) { if (this.ctx.state === 'suspended') void this.ctx.resume(); return; }
+    if (this.ctx) { if (this.ctx.state === 'suspended') void this.ctx.resume().then(() => this.applyMute()).catch(() => undefined); this.applyMute(); return; }
     try {
       const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = this.volume;
+      this.master.gain.value = this.muted ? 0 : this.volume;
       this.master.connect(this.ctx.destination);
       this.musicGain = this.ctx.createGain();
       this.musicGain.gain.value = 0.35;
@@ -29,8 +36,18 @@ export class AudioEngine {
     } catch { this.ctx = null; }
   }
 
-  setVolume(v: number): void { this.volume = v; if (this.master && this.ctx) this.master.gain.value = this.muted ? 0 : v; }
-  toggleMute(): boolean { this.muted = !this.muted; this.setVolume(this.volume); return this.muted; }
+  /** Enforce muted flag on master gain (central calls after loading save / toggling mute). */
+  applyMute(): void {
+    if (this.master && this.ctx) {
+      try { this.master.gain.value = this.muted ? 0 : this.volume; } catch { /* ignore */ }
+    }
+    // whoosh routes through master (already muted), but zero its own gain too when muted
+    if (this.muted && this.whooshNodes) {
+      try { this.whooshNodes.gain.gain.value = 0; } catch { /* ignore */ }
+    }
+  }
+  setVolume(v: number): void { this.volume = v; this.applyMute(); }
+  toggleMute(): boolean { this.muted = !this.muted; this.applyMute(); return this.muted; }
 
   private env(g: GainNode, t: number, peak: number, decay: number): void {
     g.gain.setValueAtTime(0.0001, t);
@@ -63,6 +80,10 @@ export class AudioEngine {
     src.start(t);
   }
 
+  /** Central sets ground surface (UI/Audio/Save owns storage; detection lives in central/world). */
+  setSurface(s: 'stone' | 'metal' | 'wood'): void { this.surface = s; }
+  /** Footstep using stored surface (central calls after setSurface from ground material). */
+  footstepAuto(run: boolean): void { this.footstep(run, this.surface); }
   footstep(run: boolean, surface: 'stone' | 'metal' | 'wood' = 'stone'): void {
     const cfg = {
       stone: { cut: run ? 900 : 600, peak: run ? 0.25 : 0.14 },
@@ -181,7 +202,46 @@ export class AudioEngine {
       n.lfo.disconnect(); n.lfoGain.disconnect(); n.src.disconnect(); n.filter.disconnect(); n.gain.disconnect();
     } catch { /* already disconnected */ }
   }
-  /** Background/visibility hooks (central calls on visibilitychange). Safe without ctx. */
+  /** Sprint/parkour wind: filtered looped noise, gain by speed. Single persistent node (no leak). */
+  whoosh(speed: number): void {
+    if (!this.ctx || !this.master) return;
+    const s = Number.isFinite(speed) ? speed : 0;
+    if (this.muted || s <= 0.5) {
+      if (this.whooshNodes) {
+        try { this.whooshNodes.gain.gain.value = 0; } catch { /* ignore */ }
+      }
+      return;
+    }
+    try {
+      if (!this.whooshNodes) {
+        const ctx = this.ctx;
+        const len = Math.max(1, Math.floor(ctx.sampleRate * 1));
+        const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+        const src = ctx.createBufferSource();
+        src.buffer = buf; src.loop = true;
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'bandpass'; filter.frequency.value = 800; filter.Q.value = 0.7;
+        const gain = ctx.createGain();
+        gain.gain.value = 0;
+        src.connect(filter); filter.connect(gain); gain.connect(this.master);
+        src.start();
+        this.whooshNodes = { src, filter, gain };
+      }
+      const g = Math.min(0.35, Math.max(0, s) * 0.03);
+      this.whooshNodes.gain.gain.value = this.muted ? 0 : g;
+      this.whooshNodes.filter.frequency.value = 500 + Math.min(2000, s * 120);
+    } catch { /* ignore */ }
+  }
+  /** Background/visibility hooks (central calls on visibilitychange). Safe without ctx. Mute-aware: resume re-applies mute. */
   suspend(): void { try { void this.ctx?.suspend(); } catch { /* ignore */ } }
-  resume(): void { try { if (this.ctx && this.ctx.state === 'suspended') void this.ctx.resume(); } catch { /* ignore */ } }
+  resume(): void {
+    try {
+      if (this.ctx && this.ctx.state === 'suspended') {
+        void this.ctx.resume().then(() => this.applyMute()).catch(() => undefined);
+      }
+    } catch { /* ignore */ }
+    this.applyMute();
+  }
 }

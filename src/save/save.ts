@@ -9,7 +9,7 @@ export interface SaveData {
   xp: number;
   upgrades: Record<string, number>;
   inventory: { smoke: number; knives: number; relic: boolean; doc: boolean; lure: number };
-  settings: { volume: number; quality: 'low' | 'med' | 'high'; invertY: boolean; cameraSens: number; lefty: boolean; uiScale: number; minimap: boolean; layout: 'default' | 'compact' | 'large'; minimapZoom: 1 | 2 | 3 };
+  settings: { volume: number; quality: 'low' | 'med' | 'high'; invertY: boolean; cameraSens: number; lefty: boolean; uiScale: number; minimap: boolean; layout: 'default' | 'compact' | 'large'; minimapZoom: 1 | 2 | 3; muted: boolean };
   checkpoint: { x: number; y: number; z: number; missionId: string } | null;
   bestGhost: Record<string, boolean>;
   worldFlags: Record<string, boolean>;
@@ -27,7 +27,7 @@ export function defaultSave(slot = 0): SaveData {
     v: 2, slot, updatedAt: Date.now(),
     missionIndex: 0, missionsDone: [], xp: 0, upgrades: {},
     inventory: { smoke: 2, knives: 3, relic: false, doc: false, lure: 1 },
-    settings: { volume: 0.8, quality: 'med', invertY: false, cameraSens: 1, lefty: false, uiScale: 1, minimap: true, layout: 'default' as const, minimapZoom: 1 as const },
+    settings: { volume: 0.8, quality: 'med', invertY: false, cameraSens: 1, lefty: false, uiScale: 1, minimap: true, layout: 'default' as const, minimapZoom: 1 as const, muted: false },
     checkpoint: null, bestGhost: {},
     worldFlags: {},
     stats: { kills: 0, ghosts: 0, deaths: 0, playTime: 0 },

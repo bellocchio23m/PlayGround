@@ -16,6 +16,19 @@ export class UI {
   private stealthTierCache = -1;
   private stealthLabelCache = '';
   private flashTimers = new Map<string, number>();
+  // --- parry flash (own div, vignette-pattern) + takedown banner (pool-1) + debug-extra ---
+  // CENTRAL WIRING (game.ts, per frame):
+  //   ui.updateVignette(dt, hp, hpMax); // damage/low-hp edge (existing)
+  //   ui.tickFx(dt);                    // NEW: fades parry flash + hides takedown banner (call every frame)
+  // Events: combat → ui.flashParry('perfect'|'good'); takedown → ui.banner(txt, sub);
+  // F3 debug: central builds string[] (vel/stamina, profile, zone, cache count, save v, SW v) → ui.setDebugExtra(lines).
+  private parryT = 0;
+  private parryDur = 0.4;
+  private parryQualityCache: 'perfect' | 'good' | '' = '';
+  private bannerT = 0;
+  private bannerTxtCache = '';
+  private bannerSubCache = '';
+  private debugExtraCache = '';
 
   constructor(private input: InputManager) {
     this.root = document.getElementById('ui')!;
@@ -357,5 +370,107 @@ export class UI {
     this.dmgT = Math.max(0, this.dmgT - dt * 1.5);
     const low = hp / hpMax < 0.35 ? 0.4 + Math.sin(performance.now() / 300) * 0.15 : 0;
     (this.els['vignette'] as HTMLElement).style.opacity = `${Math.min(1, this.dmgT + low)}`;
+  }
+
+  private ensureParryEl(): HTMLElement | null {
+    let el = this.root.querySelector<HTMLElement>('#parry-flash');
+    if (!el) {
+      const hud = this.els['hud'];
+      if (!hud) return null;
+      el = document.createElement('div');
+      el.id = 'parry-flash';
+      el.setAttribute('style', 'position:absolute;inset:0;opacity:0;pointer-events:none');
+      hud.appendChild(el);
+    }
+    return el;
+  }
+
+  /** Parry flash: gold fullscreen-edge for perfect, white for good. Fades in tickFx(dt). */
+  flashParry(quality: 'perfect' | 'good'): void {
+    const el = this.ensureParryEl();
+    this.parryDur = quality === 'perfect' ? 0.5 : 0.35;
+    this.parryT = this.parryDur;
+    if (!el) return;
+    // change-guard: only rewrite background when quality changes (no per-frame churn)
+    if (quality !== this.parryQualityCache) {
+      this.parryQualityCache = quality;
+      const edge = quality === 'perfect'
+        ? 'rgba(255,215,100,.65)'
+        : 'rgba(255,255,255,.5)';
+      el.style.background = `radial-gradient(ellipse at center,transparent 55%,${edge} 100%)`;
+    }
+    if (el.style.opacity !== '1') el.style.opacity = '1';
+  }
+
+  private ensureBannerEl(): HTMLElement | null {
+    let el = this.root.querySelector<HTMLElement>('#takedown-banner');
+    if (!el) {
+      const hud = this.els['hud'];
+      if (!hud) return null;
+      el = document.createElement('div');
+      el.id = 'takedown-banner';
+      el.setAttribute('style', 'position:absolute;top:34%;left:50%;transform:translateX(-50%);text-align:center;display:none;pointer-events:none;font-family:Georgia,\'Times New Roman\',serif');
+      hud.appendChild(el);
+    }
+    return el;
+  }
+
+  /** Center serif takedown banner (FALCE/PERFETTA/AEREO/FIN). 1.2s, queue max 1 (replace). Pool-1 div. */
+  banner(txt: string, sub = ''): void {
+    const el = this.ensureBannerEl();
+    this.bannerT = 1.2;
+    if (!el) return;
+    // change-guard: only rewrite DOM when text changes
+    if (txt === this.bannerTxtCache && sub === this.bannerSubCache) {
+      if (el.style.display !== 'block') el.style.display = 'block';
+      return;
+    }
+    this.bannerTxtCache = txt;
+    this.bannerSubCache = sub;
+    const html = `<div style="font-size:44px;letter-spacing:8px;color:#ffd98a;text-shadow:0 2px 18px rgba(0,0,0,.8)">${txt}</div>` +
+      (sub ? `<div style="font-size:15px;letter-spacing:3px;color:#e8edf5;margin-top:4px">${sub}</div>` : '');
+    if (el.innerHTML !== html) el.innerHTML = html;
+    if (el.style.display !== 'block') el.style.display = 'block';
+  }
+
+  /** F3 extra lines (central passes strings: vel/stamina, profile, zone, cache count, save v, SW v). Change-guarded. */
+  setDebugExtra(lines: string[]): void {
+    let el = this.root.querySelector<HTMLElement>('#debug-extra');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'debug-extra';
+      el.setAttribute('style', 'position:absolute;left:8px;top:calc(38% + 130px);font-size:11px;background:rgba(0,0,0,.6);padding:6px 8px;border-radius:6px;display:none;white-space:pre;color:#9fd8ff');
+      this.root.appendChild(el);
+    }
+    const txt = lines.join('\n');
+    // change-guard: no DOM write when identical (no per-frame churn)
+    if (txt === this.debugExtraCache) return;
+    this.debugExtraCache = txt;
+    if (!txt) { if (el.style.display !== 'none') el.style.display = 'none'; return; }
+    if (el.style.display !== 'block') el.style.display = 'block';
+    if (el.textContent !== txt) el.textContent = txt;
+  }
+
+  /** Per-frame fx fade for parry flash + banner timeout. Central calls every frame (see CENTRAL WIRING above). */
+  tickFx(dt: number): void {
+    if (this.parryT > 0) {
+      this.parryT = Math.max(0, this.parryT - dt);
+      const el = this.root.querySelector<HTMLElement>('#parry-flash');
+      if (el) {
+        const op = this.parryDur > 0 ? this.parryT / this.parryDur : 0;
+        const s = `${Math.max(0, Math.min(1, op))}`;
+        if (el.style.opacity !== s) el.style.opacity = s;
+      }
+      // keep parryQualityCache so next flashParry with same quality skips background rewrite
+    }
+    if (this.bannerT > 0) {
+      this.bannerT = Math.max(0, this.bannerT - dt);
+      if (this.bannerT <= 0) {
+        const el = this.root.querySelector<HTMLElement>('#takedown-banner');
+        if (el && el.style.display !== 'none') el.style.display = 'none';
+        this.bannerTxtCache = '';
+        this.bannerSubCache = '';
+      }
+    }
   }
 }

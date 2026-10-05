@@ -137,12 +137,62 @@ ok(Math.abs(sd2.data.stats.playTime - 12.5) < 1e-9, 'addPlayTime(dt) accumulates
 ok(typeof sd2.saveMissionComplete === 'function', 'saveMissionComplete helper exists');
 
 console.log('service worker (source audit):');
-ok(/'shadowline-v3'/.test(swSrc), 'CACHE name stays v3 (no churn)');
+ok(/'shadowline-v5'/.test(swSrc), 'CACHE v5 after offline strategy change (navigate-first + SWR)');
 ok(/SKIP_WAITING/.test(swSrc) && /addEventListener\('message'/.test(swSrc), 'message handler supports SKIP_WAITING');
 ok(/controllerchange/.test(swSrc), 'controllerchange reload protocol documented');
 ok(/(src\|href)/.test(swSrc), 'precache scrape covers src/href (js/css/fonts)');
 ok(/\.png|EXTRA_BEST_EFFORT/.test(swSrc), 'png icons cached (best-effort, never fails install)');
-ok(/isDoc \? caches\.match/.test(swSrc), 'navigation fallback is doc-only (never JS/CSS MIME breakage)');
+ok(/isDoc/.test(swSrc) && /status:\s*503/.test(swSrc), 'navigation fallback is doc-only (scripts get 503, never HTML MIME breakage)');
+
+console.log('parry flash ui (source audit):');
+ok(/flashParry\(quality:\s*'perfect'\s*\|\s*'good'\)/.test(uiSrc), "flashParry(quality:'perfect'|'good') exists");
+ok(/parry-flash/.test(uiSrc), 'parry flash uses its own #parry-flash div (vignette pattern)');
+ok(/255,\s*215,\s*100/.test(uiSrc), 'perfect flash is gold');
+ok(/tickFx\(dt:\s*number\)/.test(uiSrc), 'tickFx(dt) exists for central per-frame fade');
+ok(/parryQualityCache/.test(uiSrc), 'parry flash change-guarded (quality cache)');
+ok(/parryT/.test(uiSrc) && /opacity/.test(uiSrc), 'tickFx fades parry flash via opacity');
+
+console.log('takedown banner (source audit):');
+ok(/banner\(txt:\s*string,\s*sub/.test(uiSrc), 'banner(txt, sub) exists');
+ok(/takedown-banner/.test(uiSrc), 'banner pools a single #takedown-banner div');
+ok(/1\.2/.test(uiSrc), 'banner shows ~1.2s');
+ok(/Georgia/.test(uiSrc), 'banner uses serif font');
+ok(/bannerTxtCache/.test(uiSrc) && /bannerSubCache/.test(uiSrc), 'banner change-guarded + queue-max-1 replace (cached txt/sub)');
+
+console.log('debug extra (source audit):');
+ok(/setDebugExtra\(lines:\s*string\[\]\)/.test(uiSrc), 'setDebugExtra(lines: string[]) exists');
+ok(/debug-extra/.test(uiSrc), 'debug extra renders into lazily-created #debug-extra div');
+ok(/debugExtraCache/.test(uiSrc), 'debug extra change-guarded (no per-frame DOM churn)');
+
+console.log('audio surface + whoosh (source audit):');
+ok(/setSurface\(s:\s*'stone'\s*\|\s*'metal'\s*\|\s*'wood'\)/.test(audioSrc), "setSurface(s) exists ('stone'|'metal'|'wood')");
+ok(/footstepAuto\(run:\s*boolean\)/.test(audioSrc), 'footstepAuto(run) exists using stored surface');
+ok(/this\.footstep\(run,\s*this\.surface\)/.test(audioSrc), 'footstepAuto delegates to footstep(run, stored surface)');
+ok(/whoosh\(speed:\s*number\)/.test(audioSrc), 'whoosh(speed) exists for sprint/parkour wind');
+ok(/whooshNodes/.test(audioSrc) && /if\s*\(!this\.whooshNodes\)/.test(audioSrc), 'whoosh uses single persistent node (singleton, no leak)');
+ok(/filter.*bandpass|bandpass.*filter/.test(audioSrc) && /0\.03|Math\.min\(0\.35/.test(audioSrc), 'whoosh is filtered noise with gain by speed');
+
+console.log('mute persistence (runtime + audit):');
+ok(/muted:\s*boolean/.test(saveSrc) && /muted:\s*false/.test(saveSrc), 'SaveData settings.muted with default false');
+ok(/applyMute\(\):\s*void/.test(audioSrc), 'AudioEngine.applyMute() exists');
+ok(/resume\(\)[\s\S]{0,400}applyMute/.test(audioSrc), 'resume() respects mute (re-applies mute)');
+const saveMod2 = loadTs('save2', saveSrc);
+ok(new saveMod2.SaveSystem().data.settings.muted === false, 'default save muted === false');
+store.clear();
+store.set('shadowline-slot-0', JSON.stringify({ v: 2, slot: 0, settings: { volume: 0.8 } }));
+ok(new saveMod2.SaveSystem().loadSlot(0).settings.muted === false, 'migrate fills muted=false for old saves');
+
+console.log('input consumeAction (runtime):');
+ok(typeof mgr.consumeAction === 'function', 'consumeAction(a) helper exists');
+mgr.tap('attack');
+ok(mgr.consumeAction('attack') === true, 'consumeAction returns true when pressed');
+ok(mgr.consumeAction('attack') === false, 'consumeAction second call returns false (edge cleared)');
+ok(mgr.pressed.attack === false && mgr.state.attack === false, 'consumeAction clears pressed + state edge');
+mgr.tap('parry'); mgr.tap('jump');
+mgr.consumeAction('parry');
+ok(mgr.pressed.jump === true && mgr.state.jump === true, 'consumeAction only clears the named action');
+mgr.lateClear();
+ok(mgr.pressed.jump === false, 'lateClear still intact after consumeAction');
 
 console.log(`\nux: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

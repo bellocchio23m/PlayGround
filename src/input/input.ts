@@ -142,6 +142,16 @@ export class InputManager {
     this.pressed[action] = true; this.state[action] = true;
   }
 
+  /** Central convenience: read + clear a single pressed edge. True iff it was pressed. Keeps tap/poll/lateClear intact. */
+  consumeAction(a: InputAction): boolean {
+    const was = !!this.pressed[a];
+    if (was) {
+      this.pressed[a] = false;
+      this.state[a] = false;
+    }
+    return was;
+  }
+
   /** called by touch buttons */
   setHold(action: 'sprint' | 'crouch', v: boolean): void {
     if (action === 'sprint') this.state.sprint = v;
