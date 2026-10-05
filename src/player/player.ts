@@ -37,6 +37,22 @@ export const TRAVERSAL_TUNE = {
   probeDist: 1.4, probeNear: 0.7, probeTol: 1.0,
   hangTopMin: 0.3, hangTopMax: 2.0, hangDist: 1.2, hangDrain: 4,
 } as const;
+// ---- Phase-3 movement gaps: crouch-slide + landing-roll tuning (local tables; CFG untouched) ----
+// Slide: enter sprinting + crouch press with planar > 6, lasts 0.7s, low friction
+// (0.6/s retain), slight steer (turn 4), single noise burst loudness 0.8.
+// Jump during slide = long-jump boost (planar x1.15, vy +1.0). Chains into vault.
+export const SLIDE_TUNE = {
+  dur: 0.7, minPlanar: 6, friction: 0.6, steer: 4, steerLerp: 1.5,
+  noise: 0.8, jumpPlanarBoost: 1.15, jumpVyBonus: 1.0, cooldown: 0.4,
+} as const;
+// Landing roll: planar > 5 converts a hard landing into a roll — landDip 0.6,
+// damage-free up to fall 8 (beyond: base rules, lethal > 12), momentum preserved.
+export const ROLL_TUNE = {
+  minPlanar: 5, landDip: 0.6, safeFall: 8, rollDur: 0.5, minFall: 1.2,
+} as const;
+// Tight-space vault fallback: N consecutive blocked frames while sprinting into a
+// low (<= 1.0m) obstacle auto-triggers vault. Tall walls (dh > 1.0) never misfire.
+export const VAULT_FALLBACK_TUNE = { blockedFrames: 2, maxObstacle: 1.0, minObstacle: 0.15, probeDist: 1.0 } as const;
 
 export type TraversableKind = 'vault' | 'mantle' | 'climb' | 'hang';
 
@@ -74,6 +90,19 @@ export class Player {
   traversableNear: TraversableKind | null = null;
   traverseDir = new THREE.Vector3(0, 0, -1);
   private _travProbe = new THREE.Vector3();
+  // ---- Phase-3 central-wiring contract (game.ts reads these; same pattern as
+  // traversableNear/traverseDir): `sliding` true while crouch-sliding, `slideT`
+  // remaining slide time (0 when idle), `rolling`/`rollT` during a landing roll,
+  // `skid` 0..1 run-to-stop lean amount, `blockedFrames` consecutive wall-hits
+  // feeding the tight-space vault fallback. All allocation-free, all additive. ----
+  sliding = false;
+  slideT = 0;
+  slideDur = SLIDE_TUNE.dur;
+  slideCD = 0;
+  rolling = false;
+  rollT = 0;
+  skid = 0;
+  blockedFrames = 0;
   coyote = 0; jumpBuf = 0;
   stepT = 0; noiseT = 0;
   airTime = 0;
@@ -101,6 +130,8 @@ export class Player {
     this.traverseDir.set(0, 0, -1);
     this.grounded = true; this.coyote = 0; this.jumpBuf = 0;
     this.crouch = false; this.vy0 = 0; this.landDip = 0;
+    this.sliding = false; this.slideT = 0; this.slideCD = 0;
+    this.rolling = false; this.rollT = 0; this.skid = 0; this.blockedFrames = 0;
   }
 
   takeDamage(dmg: number, fromYaw: number): boolean {
@@ -124,9 +155,15 @@ export class Player {
       return;
     }
     const P = CFG.player;
-    // crouch toggle
+    // crouch toggle (capture edges BEFORE resolving: slide entry needs the
+    // sprinting-before-crouch state, since crouch itself disables sprint)
+    const wasCrouch = this.crouch;
+    const wasSprinting = this.sprinting;
     if (input.pressed.crouchToggle) this.crouch = !this.crouch;
     if (input.state.crouch) this.crouch = true;
+    // unified crouch-press edge: covers keyboard toggle (state), touch
+    // (pressed) and hold rising edge — sprint-slide listens on this.
+    const crouchPressedEdge = input.pressed.crouchToggle || input.state.crouchToggle || (this.crouch && !wasCrouch);
     const wantMove = Math.hypot(input.state.moveX, input.state.moveY) > 0.05;
 
     // stamina
@@ -145,6 +182,7 @@ export class Player {
       if (this.attackT > 0) { this.attackT = 0; this.comboWindow = 0.4; } // cancel in dodge
       this.dodgeT = 0.42; this.dodgeCD = 0.8; this.iframes = CFG.combat ? 0.4 : 0.4;
       this.stamina -= 18; this.crouch = false;
+      this.sliding = false; this.slideT = 0; // dodge cancels slide (no stacked states)
       this.audio.vault();
     }
     // parry
@@ -158,7 +196,6 @@ export class Player {
     // attack input (buffered; dodge-cancel into dash attack in late dodge)
     if ((input.pressed.attack || input.pressed.heavy) && this.attackT <= 0 && (this.dodgeT <= 0 || this.dodgeT < 0.2) && this.vaultT <= 0 && this.climbT <= 0 && this.mantleT <= 0 && !this.hanging) {
       if (this.dodgeT > 0) this.dodgeT = 0; // cancel dodge -> dash attack
-      this.attackKind = input.pressed.heavy ? 'heavy' : 'light';
       this.attackKind = input.pressed.heavy ? 'heavy' : 'light';
       this.attackT = this.attackKind === 'heavy' ? 0.62 : 0.42;
       if (this.comboWindow > 0) this.combo = Math.min(2, this.combo + 1); else this.combo = 0;
@@ -177,6 +214,26 @@ export class Player {
       world.collideCircle(this.pos, 0.4, 1.2);
       this.state = 'dodge';
       this.animator.animate(this.rig, 'dodge', 6, dt, { crouch: false, attacking: 0, parry: 0, dodge: 1 - this.dodgeT / 0.42, dead: false, stagger: 0 });
+      this.syncMesh(dt);
+      return;
+    }
+
+    // crouch-slide entry: sprint + crouch press while sprinting fast (planar > 6).
+    // Grounded only, 0.7s, cancellable into vault/jump. Cooldown avoids retrigger.
+    this.slideCD -= dt;
+    if (!this.sliding) {
+      const planarEntry = Math.hypot(this.vel.x, this.vel.z);
+      if (this.grounded && this.vaultT <= 0 && this.mantleT <= 0 && this.climbT <= 0 &&
+        !this.hanging && this.slideCD <= 0 && crouchPressedEdge &&
+        planarEntry > SLIDE_TUNE.minPlanar && (this.sprinting || wasSprinting || planarEntry > 6)) {
+        this.startSlide();
+      }
+    }
+    // crouch-slide overrides normal locomotion (like dodge): low friction,
+    // slight steer, chains into vault + long-jump. Allocation-free.
+    if (this.sliding) {
+      this.updateSlide(dt, input, world, camYaw, wantMove);
+      this.updateTraverseHint(world);
       this.syncMesh(dt);
       return;
     }
@@ -237,7 +294,7 @@ export class Player {
     // integrate
     this.pos.x += this.vel.x * dt;
     this.pos.z += this.vel.z * dt;
-    world.collideCircle(this.pos, 0.4, 1.4);
+    const hitWall = world.collideCircle(this.pos, 0.4, 1.4);
     // ground: support standing on rooftops
     const gy = world.groundHeight(this.pos.x, this.pos.z);
     this.pos.y += this.vy * dt;
@@ -245,14 +302,36 @@ export class Player {
       if (!this.grounded) {
         const fall = this.lastGroundedY - this.pos.y;
         const hard = fall > 4.5;
-        this.audio.land(hard);
-        this.events.landed(hard);
-        if (fall > 1.2) {
-          this.events.noise({ x: this.pos.x, y: this.pos.y, z: this.pos.z, radius: hard ? 22 : 12, loudness: hard ? 1.4 : 0.8, kind: 'land', t: performance.now() / 1000 });
+        const planarLand = Math.hypot(this.vel.x, this.vel.z);
+        // landing roll: fast (planar > 5) landings convert a hard landing into
+        // a roll — landDip 0.6, damage-free up to fall 8, momentum preserved.
+        // Never worse than base rules: beyond 8m the lethal (> 12) rule applies.
+        const doRoll = planarLand > ROLL_TUNE.minPlanar && fall > ROLL_TUNE.minFall;
+        if (doRoll) {
+          this.rolling = true;
+          this.rollT = ROLL_TUNE.rollDur;
+          this.state = 'landing';
+          this.landDip = ROLL_TUNE.landDip; // 0.6: lighter than a hard thud (1.0)
+          this.audio.land(false);
+          this.events.landed(false);
+          if (fall > ROLL_TUNE.minFall) {
+            this.events.noise({ x: this.pos.x, y: this.pos.y, z: this.pos.z, radius: 10, loudness: 0.6, kind: 'land', t: performance.now() / 1000 });
+          }
+          if (fall <= ROLL_TUNE.safeFall) {
+            // clean roll: no damage up to fall 8, speed kept (roll out of it)
+          } else if (fall > 12) {
+            this.takeDamage((fall - 12) * 8, this.yaw);
+          }
+        } else {
+          this.audio.land(hard);
+          this.events.landed(hard);
+          if (fall > 1.2) {
+            this.events.noise({ x: this.pos.x, y: this.pos.y, z: this.pos.z, radius: hard ? 22 : 12, loudness: hard ? 1.4 : 0.8, kind: 'land', t: performance.now() / 1000 });
+          }
+          if (fall > 12) this.takeDamage((fall - 12) * 8, this.yaw);
+          this.state = 'landing';
+          this.landDip = hard ? 1 : 0.45; // squash + brief weight
         }
-        if (fall > 12) this.takeDamage((fall - 12) * 8, this.yaw);
-        this.state = 'landing';
-        this.landDip = hard ? 1 : 0.45; // squash + brief weight
       }
       this.pos.y = gy; this.vy = 0; this.grounded = true; this.coyote = 0.12; this.airTime = 0;
       this.lastGroundedY = gy;
@@ -302,12 +381,22 @@ export class Player {
     // vault / mantle / climb triggers (jump pressed near ledge, or walk into it;
     // airborne vault/mantle allowed for sprint-jump chains)
     if (input.pressed.jump || (wantMove && this.grounded) || (!this.grounded && wantMove)) this.tryTraversal(world);
+    // tight-space fallback: sprinting into a low obstacle that blocks horizontal
+    // motion 2 frames in a row auto-vaults (tall walls never trigger: dh > 1.0 rejected)
+    this.updateVaultFallback(world, wantMove, hitWall);
 
     // per-frame traversal hint for UI
     this.updateTraverseHint(world);
 
     // state label (+ attack lunge: forward step during first 55% of swing)
     this.hitT -= dt; this.landDip = Math.max(0, this.landDip - dt * 3);
+    this.rollT = Math.max(0, this.rollT - dt);
+    if (this.rollT <= 0) this.rolling = false;
+    // run-to-stop skid 0..1: high speed + stick released = lean-back skid pose
+    // (player drives it; rig only reads it — allocation-free scalar blend).
+    const skidTarget = (!wantMove && this.grounded && planar > 3.6)
+      ? clamp((planar - 3.6) / 5, 0, 1) : 0;
+    this.skid += (skidTarget - this.skid) * Math.min(1, dt * 8);
     if (this.attackT > 0) {
       this.attackT -= dt;
       if (this.attackT <= 0) this.comboWindow = 0.6;
@@ -327,6 +416,7 @@ export class Player {
     else if (this.vaultT > 0) this.state = 'vault';
     else if (this.climbT > 0) this.state = 'climb';
     else if (!this.grounded) this.state = this.vy > 0 ? 'jump' : 'fall';
+    else if (this.sliding) this.state = 'slide';
     else if (this.crouch) this.state = 'crouch';
     else if (planar > 7.2) this.state = 'sprint';
     else if (planar > 3.6) this.state = 'run';
@@ -338,8 +428,133 @@ export class Player {
     this.animator.animate(this.rig, this.state, planar, dt, {
       crouch: this.crouch, attacking: atkPhase, parry: this.parryT > 0.1 ? 1 : 0,
       dodge: 0, dead: false, stagger: Math.max(0, this.hitT - 0.15),
+      slide: this.sliding ? 1 : 0, roll: this.rollT > 0 ? this.rollT / ROLL_TUNE.rollDur : 0, skid: this.skid,
     });
     this.syncMesh(dt);
+  }
+
+  /** crouch-slide: 0.7s low-friction grounded slide entered from sprint.
+   *  Single noise burst (loudness 0.8). Chains into vault/mantle via the shared
+   *  probe path; jump during slide exits as a long-jump boost (planar x1.15).
+   *  Allocation-free: reuses pos/vel/yaw only. */
+  private startSlide(): void {
+    this.sliding = true;
+    this.slideT = SLIDE_TUNE.dur;
+    this.slideDur = SLIDE_TUNE.dur;
+    this.slideCD = SLIDE_TUNE.cooldown;
+    this.crouch = true;
+    this.state = 'slide';
+    this.audio.footstep(true);
+    this.events.noise({
+      x: this.pos.x, y: this.pos.y, z: this.pos.z,
+      radius: SLIDE_TUNE.noise * 14 * this.stealthMul, loudness: SLIDE_TUNE.noise * this.stealthMul,
+      kind: 'slide', t: performance.now() / 1000,
+    });
+  }
+
+  /** slide tick: slight steer toward stick, low friction, ground stick,
+   *  vault chain + buffered long-jump exit. Early-outs on timer/slow/air. */
+  private updateSlide(dt: number, input: InputManager, world: World, camYaw: number, wantMove: boolean): void {
+    const P = CFG.player;
+    this.slideT -= dt;
+    // slight steer: yaw follows stick at low turn rate, velocity eases after it
+    if (wantMove) {
+      const ix = input.state.moveX; const iy = input.state.moveY;
+      const s = Math.sin(camYaw); const c = Math.cos(camYaw);
+      let mx = ix * c - iy * s; let mz = -ix * s - iy * c;
+      const m = Math.hypot(mx, mz) || 1;
+      mx /= m; mz /= m;
+      this.yaw = dampAngle(this.yaw, Math.atan2(mx, mz) + Math.PI, SLIDE_TUNE.steer, dt);
+    }
+    // low friction: keep most of the entry speed over 0.7s
+    const keep = Math.max(0, 1 - SLIDE_TUNE.friction * dt);
+    this.vel.x *= keep; this.vel.z *= keep;
+    // ease velocity toward (slightly turned) facing so steering actually curves
+    const fx = -Math.sin(this.yaw); const fz = -Math.cos(this.yaw);
+    const sp = Math.hypot(this.vel.x, this.vel.z);
+    const k = Math.min(1, SLIDE_TUNE.steerLerp * dt);
+    this.vel.x += (fx * sp - this.vel.x) * k;
+    this.vel.z += (fz * sp - this.vel.z) * k;
+    // gravity + ground stick (slide off an edge -> clean airborne exit, speed kept)
+    this.vy += P.gravity * dt;
+    this.pos.x += this.vel.x * dt;
+    this.pos.z += this.vel.z * dt;
+    world.collideCircle(this.pos, 0.4, 1.2);
+    const gy = world.groundHeight(this.pos.x, this.pos.z);
+    this.pos.y += this.vy * dt;
+    if (this.pos.y <= gy + 0.02 && this.vy <= 0) {
+      this.pos.y = gy; this.vy = 0; this.grounded = true; this.coyote = 0.12;
+      this.lastGroundedY = gy;
+    } else {
+      if (this.grounded) { this.grounded = false; this.lastGroundedY = this.pos.y; }
+      this.sliding = false;
+      this.state = 'fall';
+    }
+    // jump buffer during slide = long-jump boost (exits slide airborne)
+    if (input.pressed.jump) this.jumpBuf = 0.15; else this.jumpBuf -= dt;
+    if (this.jumpBuf > 0 && this.grounded) {
+      this.vy = JUMP_TUNE.baseVel + SLIDE_TUNE.jumpVyBonus;
+      this.vel.x *= SLIDE_TUNE.jumpPlanarBoost;
+      this.vel.z *= SLIDE_TUNE.jumpPlanarBoost;
+      this.grounded = false; this.coyote = 0; this.jumpBuf = 0;
+      this.sliding = false; this.crouch = false;
+      this.audio.jump();
+      this.events.noise({ x: this.pos.x, y: this.pos.y, z: this.pos.z, radius: 10, loudness: 0.7, kind: 'jump', t: performance.now() / 1000 });
+    }
+    // chain into vault/mantle without standing up first
+    if (this.sliding && (input.pressed.jump || wantMove)) this.tryTraversal(world);
+    if (this.vaultT > 0 || this.mantleT > 0 || this.climbT > 0) {
+      this.sliding = false;
+      return;
+    }
+    const planar = Math.hypot(this.vel.x, this.vel.z);
+    this.moving = planar;
+    this.stepT -= dt * (1 + planar * 0.25);
+    // natural exit: timer out or bled off speed -> stay crouched, brief retrigger lock
+    if (this.slideT <= 0 || planar < 1.5) {
+      this.sliding = false;
+      this.crouch = true;
+      this.slideCD = Math.max(this.slideCD, SLIDE_TUNE.cooldown);
+      this.state = 'crouch';
+    } else {
+      this.state = 'slide';
+    }
+    this.animator.animate(this.rig, this.state, planar, dt, {
+      crouch: true, attacking: 0, parry: 0,
+      dodge: 0, dead: false, stagger: 0,
+      slide: this.sliding ? 1 - this.slideT / this.slideDur : 0, roll: 0, skid: 0,
+    });
+  }
+
+  /** tight-space vault fallback: when sprinting into an obstacle that blocks
+   *  horizontal motion 2 frames in a row AND the obstacle ahead is low
+   *  (0.15–1.0m), auto-start a vault over it. Tall walls (dh > 1.0m) can never
+   *  trigger this — they fall through to the normal (no) traversal path. */
+  private updateVaultFallback(world: World, wantMove: boolean, hitWall: boolean): void {
+    if (this.vaultT > 0 || this.climbT > 0 || this.mantleT > 0 || this.hanging || this.sliding) {
+      this.blockedFrames = 0;
+      return;
+    }
+    if (hitWall && this.grounded && this.sprinting && wantMove) this.blockedFrames++;
+    else this.blockedFrames = 0;
+    if (this.blockedFrames < VAULT_FALLBACK_TUNE.blockedFrames) return;
+    const F = VAULT_FALLBACK_TUNE;
+    const dx = -Math.sin(this.yaw); const dz = -Math.cos(this.yaw);
+    const px = this.pos.x + dx * F.probeDist; const pz = this.pos.z + dz * F.probeDist;
+    let topY = world.groundHeight(px, pz);
+    for (const l of world.ledges) {
+      if (px >= l.min.x - 1.0 && px <= l.max.x + 1.0 && pz >= l.min.z - 1.0 && pz <= l.max.z + 1.0) {
+        if (l.topY > topY) topY = l.topY;
+      }
+    }
+    const dh = topY - this.pos.y;
+    if (dh > F.minObstacle && dh <= F.maxObstacle) {
+      this.startVault(topY, dx, dz);
+      this.blockedFrames = 0;
+    } else {
+      // tall wall or open ground: hold the counter (no spam, no misfire)
+      this.blockedFrames = F.blockedFrames;
+    }
   }
 
   /** probe ledges in facing direction; start vault / mantle / climb.

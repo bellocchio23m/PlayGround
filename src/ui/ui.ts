@@ -16,6 +16,11 @@ export class UI {
   private stealthTierCache = -1;
   private stealthLabelCache = '';
   private flashTimers = new Map<string, number>();
+  /** act-grid button scale multiplier (transient; central owns persistence). 1 = preset default. */
+  private buttonScale = 1;
+  private bossCache = '';
+  private noiseCache = -1;
+  private promptPulseTimer: number | null = null;
 
   constructor(private input: InputManager) {
     this.root = document.getElementById('ui')!;
@@ -64,7 +69,7 @@ export class UI {
     <div id="hud" style="position:absolute;inset:0;display:none">
       <div id="objectives" style="position:absolute;top:calc(10px + env(safe-area-inset-top));left:12px;background:var(--panel);border-left:3px solid var(--acc);padding:8px 12px;border-radius:0 8px 8px 0;max-width:min(46vw,340px);font-size:13px"></div>
       <div id="detection" style="position:absolute;top:calc(10px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);font-size:26px;display:none">👁</div>
-      <div style="position:absolute;top:calc(182px + env(safe-area-inset-top));right:12px;width:min(34vw,210px)">
+      <div id="stat-block" style="position:absolute;top:calc(182px + env(safe-area-inset-top));right:12px;width:min(34vw,210px)">
         <div style="height:8px;background:#222c3b;border-radius:4px;overflow:hidden"><div id="hpbar" style="height:100%;width:100%;background:linear-gradient(90deg,#e63946,#ff7a5c)"></div></div>
         <div style="height:6px;background:#222c3b;border-radius:3px;overflow:hidden;margin-top:4px"><div id="stambar" style="height:100%;width:100%;background:#59c2ff"></div></div>
         <div id="xpbar" style="margin-top:4px;font-size:11px;color:#9fb0c9"></div>
@@ -286,8 +291,9 @@ export class UI {
     grid.style.bottom = `calc(${cfg.bottom}px + env(safe-area-inset-bottom))`;
     grid.style.right = `${cfg.right}px`;
     for (const b of Array.from(grid.querySelectorAll<HTMLElement>('button'))) {
-      b.style.minWidth = `${cfg.cols}px`;
-      b.style.minHeight = p === 'compact' ? '42px' : p === 'large' ? '56px' : '48px';
+      b.style.minWidth = `${Math.round(cfg.cols * this.buttonScale)}px`;
+      const h = p === 'compact' ? 42 : p === 'large' ? 56 : 48;
+      b.style.minHeight = `${Math.round(h * this.buttonScale)}px`;
       b.style.fontSize = `${cfg.font}px`;
       b.style.padding = p === 'compact' ? '6px 8px' : '10px 14px';
     }
@@ -296,6 +302,19 @@ export class UI {
       for (const b of Array.from(sys.querySelectorAll<HTMLElement>('button'))) {
         b.style.fontSize = `${cfg.font}px`;
         b.style.minHeight = p === 'compact' ? '40px' : '48px';
+      }
+    }
+    // compact: dock stat block left of the minimap so it never overlaps the buttons on short screens
+    const stats = this.root.querySelector<HTMLElement>('#stat-block');
+    if (stats) {
+      if (p === 'compact') {
+        stats.style.top = 'calc(64px + env(safe-area-inset-top))';
+        stats.style.right = '130px';
+        stats.style.width = '150px';
+      } else {
+        stats.style.top = 'calc(182px + env(safe-area-inset-top))';
+        stats.style.right = '12px';
+        stats.style.width = '';
       }
     }
   }
@@ -339,6 +358,83 @@ export class UI {
   }
   /** Minimap zoom store (central drawMinimap reads minimapZoom). */
   setMinimapZoom(z: 1 | 2 | 3): void { this.minimapZoom = z; }
+  /** Button position/size configurability: scale act-grid button min sizes.
+   *  s in [0.5, 2]; transient only (central owns save). Re-applies current
+   *  layout preset sizes multiplied by s. Throttle-friendly: no-op when unchanged. */
+  setButtonScale(s: number): void {
+    const v = Math.min(2, Math.max(0.5, Number.isFinite(s) ? s : 1));
+    if (v === this.buttonScale) return;
+    this.buttonScale = v;
+    const grid = this.root.querySelector<HTMLElement>('#act-grid');
+    if (!grid) return;
+    const base = this.layout === 'compact' ? 52 : this.layout === 'large' ? 76 : 64;
+    const baseH = this.layout === 'compact' ? 42 : this.layout === 'large' ? 56 : 48;
+    for (const b of Array.from(grid.querySelectorAll<HTMLElement>('button'))) {
+      b.style.minWidth = `${Math.round(base * v)}px`;
+      b.style.minHeight = `${Math.round(baseH * v)}px`;
+    }
+  }
+  /** Prompt box pulse on new objective (call instead of prompt() when objective changes). */
+  flashPrompt(): void {
+    const el = this.els['prompt'] ?? this.root.querySelector<HTMLElement>('#prompt');
+    if (!el) return;
+    if (!this.els['prompt']) this.els['prompt'] = el;
+    el.style.transition = 'box-shadow 120ms ease, border-color 120ms ease';
+    el.style.boxShadow = '0 0 0 2px #e63946, 0 0 18px rgba(230,57,70,.8)';
+    el.style.borderColor = '#e63946';
+    if (this.promptPulseTimer !== null) window.clearTimeout(this.promptPulseTimer);
+    this.promptPulseTimer = window.setTimeout(() => {
+      el.style.boxShadow = '';
+      el.style.borderColor = '#3a4a63';
+      this.promptPulseTimer = null;
+    }, 320);
+  }
+  /** Thin top boss HP bar for m8; central updates each frame. Pass null to hide.
+   *  Throttle-friendly: DOM writes only on name/rounded-frac change. */
+  setBossBar(name: string | null, frac: number): void {
+    let wrap = this.root.querySelector<HTMLElement>('#boss-bar');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = 'boss-bar';
+      wrap.setAttribute('style', 'position:absolute;top:calc(6px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);width:min(52vw,420px);display:none;text-align:center');
+      wrap.innerHTML = '<div id="boss-name" style="font-size:11px;letter-spacing:2px;color:#ffb45e"></div>' +
+        '<div style="height:5px;background:#222c3b;border-radius:3px;overflow:hidden;margin-top:3px"><div id="boss-fill" style="height:100%;width:100%;background:linear-gradient(90deg,#e63946,#ffb45e)"></div></div>';
+      this.els['hud']?.appendChild(wrap);
+    }
+    if (name === null) {
+      if (wrap.style.display !== 'none') wrap.style.display = 'none';
+      this.bossCache = '';
+      return;
+    }
+    const f = Math.min(1, Math.max(0, frac));
+    const key = `${name}|${Math.round(f * 200)}`;
+    if (key === this.bossCache) return;
+    this.bossCache = key;
+    wrap.style.display = 'block';
+    const nm = wrap.querySelector<HTMLElement>('#boss-name');
+    const fill = wrap.querySelector<HTMLElement>('#boss-fill');
+    if (nm && nm.textContent !== name) nm.textContent = name;
+    if (fill) fill.style.width = `${f * 100}%`;
+  }
+  /** Subtle 'RUMORE' indicator when player is loud (sprint/fight). 0=hidden,1=soft,2=loud.
+   *  Minimal visual noise: single small badge, change-guarded. */
+  setNoiseRing(level: 0 | 1 | 2): void {
+    if (level === this.noiseCache) return;
+    this.noiseCache = level;
+    let el = this.root.querySelector<HTMLElement>('#noise-ring');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'noise-ring';
+      el.setAttribute('style', 'position:absolute;top:calc(64px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);font-size:10px;letter-spacing:2px;color:#8fa3c1;background:rgba(10,14,20,.55);border:1px solid #3a4a63;padding:2px 10px;border-radius:10px;display:none;white-space:nowrap');
+      this.els['hud']?.appendChild(el);
+    }
+    if (level === 0) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    const txt = level === 1 ? '· RUMORE' : '·· RUMORE';
+    if (el.textContent !== txt) el.textContent = txt;
+    const color = level === 1 ? '#8fa3c1' : '#ffb45e';
+    if (el.style.color !== color) el.style.color = color;
+  }
   /** Visual active-state flash on tap (central may call; auto-called by touch bindings). */
   flashButton(id: string): void {
     const el = this.els[id] ?? this.root.querySelector<HTMLElement>('#' + id);

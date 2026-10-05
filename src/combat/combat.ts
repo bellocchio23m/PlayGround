@@ -31,6 +31,16 @@
 //  - PERF (obj 20 / rules): no per-frame allocations in hit resolution.
 //    Hot paths use only primitives; lastHitDir allocates ONLY on a landed
 //    hit (event, not per-frame); debugLastResolution is a reused object.
+//
+// Phase-3 gaps (additive, 100% backward compat — signatures unchanged):
+//  1. Second light variant: comboDir 1|-1 flips per landed swing for anim/FX.
+//  2. Charged-heavy approx: heavy + crouch-stationary = low sweep 'SPAZZATA'
+//     (arc 1.4, range +0.8 total, same dmg, stagger 1.0).
+//  3. Parry readability: parryWindow() {total 0.45, perfect 0.15, active}.
+//  4. Damage fairness: single enemy hit capped at 40% of player max HP.
+//  5. Stagger fairness: stagger > 0.8 => +25% damage (incl. special).
+//  6. Ghost-hitbox hardening: resolveCount/rejectRange/rejectArc/rejectPhase/
+//     rejectHeight counters, no allocations.
 import * as THREE from 'three';
 import { CFG } from '../core/config';
 import { angleDiff } from '../core/utils';
@@ -60,12 +70,21 @@ export const COMBAT_TUNING = {
   /** parryT counts down from 0.45; > this = perfect (first 0.15s). */
   perfectParryT: 0.3,
   parryMinT: 0.1,
+  /** Full parryT duration (counts down from this on parry press). */
+  parryTotal: 0.45,
+  /** Length of the perfect slice at the start of parryT (0.45-0.30). */
+  parryPerfectLen: 0.15,
   staggerLight: 0.35,
   staggerHeavy: 0.9,
   staggerDash: 1.1,
   staggerSpecial: 1.2,
   staggerParry: 1.1,
   staggerPerfect: 1.6,
+  /** Low-sweep (crouch-stationary heavy) stagger. */
+  staggerSweep: 1.0,
+  /** Staggered enemies (stagger > this) take bonus damage. */
+  staggerBonusThreshold: 0.8,
+  staggerBonusMul: 1.25,
   parryFlash: 0.4,
   parryFlashPerfect: 0.8,
   knockback: 0.4,
@@ -73,6 +92,12 @@ export const COMBAT_TUNING = {
   specialDmgMul: 1.6,
   specialCost: 35,
   specialCooldown: 6,
+  /** Low-sweep arc tolerance (wider than base 1.0 rad). */
+  sweepArc: 1.4,
+  /** Low-sweep extra range over the heavy bonus (heavy +0.4, sweep +0.4 more = +0.8 total). */
+  sweepRangeExtra: 0.4,
+  /** Single enemy hit never exceeds this fraction of player max HP. */
+  enemyHitCapFrac: 0.4,
 } as const;
 
 function nowMs(): number {
@@ -95,6 +120,25 @@ export class CombatSystem {
   debugLastResolution: { range: number; phase: number; facingDiff: number; dealt: boolean } = {
     range: 0, phase: 0, facingDiff: 0, dealt: false,
   };
+  // ---- P3 gaps (additive, backward-compat) ----
+  // 1) Second light variant: alternate slash direction per combo step.
+  //    comboDir flips 1 -> -1 -> 1 on every landed player swing (see
+  //    updatePlayerAttack). Typical chain combo 0/1/2 therefore renders
+  //    R/L/R. Central anim/FX reads this; damage is UNCHANGED.
+  /** Slash direction for anim/FX variety: 1 = right, -1 = left. Flipped per landed swing. */
+  comboDir: 1 | -1 = 1;
+  // 6) Ghost-hitbox hardening: allocation-free debug counters for central QA.
+  //    resolveCount = enemy evaluations; reject* = why each eval missed.
+  /** Total enemy hit evaluations (updatePlayerAttack + trySpecial). */
+  resolveCount = 0;
+  /** Evaluations rejected: target beyond range. */
+  rejectRange = 0;
+  /** Evaluations rejected: outside facing arc. */
+  rejectArc = 0;
+  /** Swings rejected: outside active frames (startup/recovery or already resolved). */
+  rejectPhase = 0;
+  /** Evaluations rejected: vertical gap too large. */
+  rejectHeight = 0;
 
   private perfectActive = false;
   private specialLastMs = -1e12;
@@ -107,6 +151,9 @@ export class CombatSystem {
     if (dt <= 0) return;
     if (this.parryFlashT > 0) this.parryFlashT = Math.max(0, this.parryFlashT - dt);
     if (this.specialCD > 0) this.specialCD = Math.max(0, this.specialCD - dt);
+    // perfectT mirrors player.riposteT via syncPerfect (decays in player.update);
+    // decay the local copy when no perfect is active so UI never sticks.
+    if (!this.perfectActive && this.perfectT > 0) this.perfectT = Math.max(0, this.perfectT - dt);
     this.lastWallMs = nowMs();
   }
 
@@ -120,6 +167,30 @@ export class CombatSystem {
     if (dt > 0.25) dt = 0.25; // tab-switch clamp: no huge jumps
     if (this.parryFlashT > 0) this.parryFlashT = Math.max(0, this.parryFlashT - dt);
     if (this.specialCD > 0) this.specialCD = Math.max(0, this.specialCD - dt);
+    if (!this.perfectActive && this.perfectT > 0) this.perfectT = Math.max(0, this.perfectT - dt);
+  }
+
+  // 3) Parry readability (no QTE, no behavior change — read-only helper).
+  //    Exact timings: parryT counts down from 0.45 on parry press.
+  //    Active while parryT > 0.10 (0.35s window). Perfect while parryT > 0.30
+  //    (first 0.15s). Success flashes parryFlashT 0.40 (normal) / 0.80
+  //    (perfect) and opens riposte 1.4s (x1.5) / 2.0s (x2.0).
+  /** Readable parry-window summary for HUD/FX (no behavior change). */
+  parryWindow(): { total: number; perfect: number; active: boolean } {
+    return {
+      total: COMBAT_TUNING.parryTotal,
+      perfect: COMBAT_TUNING.parryPerfectLen,
+      active: this.parryFlashT > 0,
+    };
+  }
+
+  // 2) Charged-heavy approximation (input has no hold): heavy pressed while
+  //    crouch-stationary (crouch && planar speed < 0.5) = 'low sweep'.
+  //    Fair + readable: same damage as heavy, wider arc 1.4 rad, +0.4 range
+  //    over heavy (+0.8 total), stagger 1.0, label 'SPAZZATA'.
+  /** True when the current heavy swing qualifies as a low sweep. */
+  isSweep(player: Player): boolean {
+    return player.attackKind === 'heavy' && player.crouch === true && player.moving < 0.5;
   }
 
   /** Remaining special cooldown (live value combining field + wall clock). */
@@ -166,15 +237,19 @@ export class CombatSystem {
     if (player.attackT <= 0) { this.hitDone = false; return { kills, hits }; }
     const heavy = player.attackKind === 'heavy';
     const dash = this.isDashAttack(player);
+    // Low sweep: heavy while crouch-stationary (no hold input exists).
+    // Dash wins over sweep (dodge-cancel is never stationary).
+    const sweep = heavy && !dash && this.isSweep(player);
     const dur = heavy ? 0.62 : 0.42;
     const phase = 1 - player.attackT / dur;
     // per-kind active-frame gating (ghost-hitbox prevention, obj 17):
-    // light 0.35-0.75, heavy 0.30-0.70, dash 0.30-0.80.
+    // light 0.35-0.75, heavy 0.30-0.70 (sweep shares heavy), dash 0.30-0.80.
     const wLo = dash ? 0.3 : heavy ? 0.3 : 0.35;
     const wHi = dash ? 0.8 : heavy ? 0.7 : 0.75;
     if (phase < wLo || phase > wHi || this.hitDone) {
       this.debugLastResolution.phase = phase;
       if (!this.hitDone) this.debugLastResolution.dealt = false;
+      if (phase < wLo || phase > wHi) this.rejectPhase++;
       return { kills, hits };
     }
     this.hitDone = true;
@@ -183,14 +258,17 @@ export class CombatSystem {
     const perfect = this.perfectActive && player.riposteT > 0;
     if (riposte) player.riposteT = 0;
     if (perfect) { this.perfectActive = false; this.perfectT = 0; }
-    // dash = lunging heavy: heavy base damage regardless of pressed kind
+    // dash = lunging heavy: heavy base damage regardless of pressed kind.
+    // sweep = same damage as heavy (fair); only arc/range/stagger/label differ.
     const base = dash ? CFG.combat.heavyDmg : heavy ? CFG.combat.heavyDmg : CFG.combat.lightDmg;
     const comboMul = player.combo === 2 ? 1.35 : 1;
     const ripMul = perfect ? 2.0 : riposte ? 1.5 : 1;
-    const dmg = Math.round(base * player.dmgMul * comboMul * ripMul);
-    const range = CFG.combat.attackRange + (dash ? 1.0 : heavy ? 0.4 : 0);
+    const rawDmg = Math.round(base * player.dmgMul * comboMul * ripMul);
+    const range = CFG.combat.attackRange + (dash ? 1.0 : sweep ? 0.4 + COMBAT_TUNING.sweepRangeExtra : heavy ? 0.4 : 0);
+    const arcTol = sweep ? COMBAT_TUNING.sweepArc : COMBAT_TUNING.arcRad;
     for (const e of enemies) {
       if (e.dead) continue;
+      this.resolveCount++;
       const dx = e.pos.x - player.pos.x; const dz = e.pos.z - player.pos.z;
       const d = Math.hypot(dx, dz);
       const dy = e.pos.y - player.pos.y;
@@ -202,13 +280,22 @@ export class CombatSystem {
       this.debugLastResolution.phase = phase;
       this.debugLastResolution.facingDiff = fdiff;
       this.debugLastResolution.dealt = false;
-      if (d > range || ady > 2.5) continue;
-      if (fdiff > 1.0) continue; // must face target
+      if (d > range) { this.rejectRange++; continue; }
+      if (ady > 2.5) { this.rejectHeight++; continue; }
+      if (fdiff > arcTol) { this.rejectArc++; continue; } // must face target (sweep wider)
+      // 5) Stagger decay fairness: staggered enemies (stagger > 0.8) take
+      //    +25% damage. Rewards hitting telegraphed/recovering enemies and
+      //    helps boss phase 1 without changing base TTK elsewhere.
+      const staggeredBonus = e.stagger > COMBAT_TUNING.staggerBonusThreshold;
+      const dmg = staggeredBonus ? Math.round(rawDmg * COMBAT_TUNING.staggerBonusMul) : rawDmg;
       const finisher = e.hp <= e.maxHp * 0.25;
       const dealt = finisher ? Math.max(dmg, e.hp) : dmg;
       const killed = e.takeDamage(dealt, player.yaw, heavy || dash, this.audio);
+      const ek = e.kind;
+      this.audio.pain(ek === 'guard' || ek === 'elite' || ek === 'brute' || ek === 'ranger' ? ek : 'guard');
       // stagger levels (obj 15): overwrite baseline with tuned values
-      e.stagger = dash ? 1.1 : heavy ? 0.9 : 0.35;
+      // sweep staggers 1.0 (between heavy 0.9 and dash 1.1).
+      e.stagger = dash ? 1.1 : sweep ? COMBAT_TUNING.staggerSweep : heavy ? 0.9 : 0.35;
       // directional reaction (obj 14): tiny safe nudge + unit dir for visuals
       if (d > 1e-4) {
         const nx = dx / d; const nz = dz / d;
@@ -217,17 +304,27 @@ export class CombatSystem {
       }
       this.debugLastResolution.dealt = true;
       this.fx.slash(e.pos);
-      const label = finisher ? 'FINISHER' : perfect ? 'PERFETTA' : riposte ? 'RIPOSTE' : dash ? 'SCATTO' : heavy ? 'PESANTE' : 'colpo';
+      const label = finisher ? 'FINISHER' : perfect ? 'PERFETTA' : riposte ? 'RIPOSTE' : sweep ? 'SPAZZATA' : dash ? 'SCATTO' : heavy ? 'PESANTE' : 'colpo';
       this.fx.damageNum(e.pos, dealt, label);
       cam.addShake(dash || heavy ? 0.35 : 0.18);
       hits++;
       if (killed) kills++;
     }
+    // 1) Second light variant: flip slash direction once per landed swing.
+    //    Central anim/FX mirrors via comboDir (1 = right, -1 = left).
+    if (hits > 0) this.comboDir = this.comboDir === 1 ? -1 : 1;
     return { kills, hits };
   }
 
   /** enemy swing resolution: player can parry (timing) or dodge (i-frames).
-   *  Consumes the per-tick `struck` flag — never misses the damage window. */
+   *  Consumes the per-tick `struck` flag — never misses the damage window.
+   *
+   *  4) Enemy-type damage fairness (fractions of 100 max HP):
+   *     guard 14 (14%) | elite 20 (20%) | captain 24 (24%) | brute slam 30
+   *     (30%) | ranger melee 10 (10%) | ranger/elite knife 12 (12%).
+   *     All are below the 40% single-hit cap, so the clamp below is a
+   *     safety net for mods/bosses, not a nerf: it never triggers today
+   *     but guarantees no cheap one-shot even if tuning drifts. */
   updateEnemyAttacks(player: Player, enemies: Enemy[], onPlayerHit: () => void): void {
     this.decayWall();
     this.syncPerfect(player);
@@ -269,7 +366,10 @@ export class CombatSystem {
       }
       if (player.dodgeT > 0 || player.iframes > 0) continue; // dodged
       const fromYaw = Math.atan2(dx, dz) + Math.PI;
-      if (player.takeDamage(e.dmg, fromYaw)) { /* damage applied */ }
+      // Fairness cap: a single enemy hit never exceeds 40% of player max HP.
+      const cap = player.hpMax * COMBAT_TUNING.enemyHitCapFrac;
+      const capped = e.dmg > cap ? cap : e.dmg;
+      if (player.takeDamage(capped, fromYaw)) { /* damage applied */ }
       onPlayerHit();
     }
   }
@@ -293,10 +393,11 @@ export class CombatSystem {
     this.specialLastMs = nowMs();
     this.specialCD = COMBAT_TUNING.specialCooldown;
     this.lastWallMs = this.specialLastMs;
-    const dmg = Math.round(CFG.combat.heavyDmg * COMBAT_TUNING.specialDmgMul * player.dmgMul);
+    const rawSpecial = Math.round(CFG.combat.heavyDmg * COMBAT_TUNING.specialDmgMul * player.dmgMul);
     let kills = 0; let hits = 0;
     for (const e of enemies) {
       if (e.dead) continue;
+      this.resolveCount++;
       const dx = e.pos.x - player.pos.x; const dz = e.pos.z - player.pos.z;
       const d = Math.hypot(dx, dz);
       const dy = e.pos.y - player.pos.y;
@@ -305,7 +406,11 @@ export class CombatSystem {
       this.debugLastResolution.phase = 1;
       this.debugLastResolution.facingDiff = 0; // 360° sweep: no facing check
       this.debugLastResolution.dealt = false;
-      if (d > COMBAT_TUNING.specialRange || ady > 2.5) continue;
+      if (d > COMBAT_TUNING.specialRange) { this.rejectRange++; continue; }
+      if (ady > 2.5) { this.rejectHeight++; continue; }
+      const dmg = e.stagger > COMBAT_TUNING.staggerBonusThreshold
+        ? Math.round(rawSpecial * COMBAT_TUNING.staggerBonusMul)
+        : rawSpecial;
       const finisher = e.hp <= e.maxHp * 0.25;
       const dealt = finisher ? Math.max(dmg, e.hp) : dmg;
       const killed = e.takeDamage(dealt, player.yaw, true, this.audio);

@@ -56,14 +56,14 @@ ok(world.includes('groundHeight') && world.includes('losBlocked'), 'collision/LO
 ok(world.includes("id: 'relic'") && world.includes('cache-smoke'), 'existing interactables intact');
 ok(world.includes('-46'), 'bounds ±46 kept');
 
-console.log('missions: 8 total, structure');
-ok(count(missions, /id: 'm\d/g) === 8, 'exactly 8 missions');
-for (const id of ['m1-ombra', 'm2-lama', 'm3-verticale', 'm4-sigillo', 'm5-fuga', 'm6-silenzio', 'm7-caccia', 'm8-corvo']) {
+console.log('missions: 9 total, structure');
+ok(count(missions, /id: 'm\d/g) === 9, 'exactly 9 missions');
+for (const id of ['m1-ombra', 'm2-lama', 'm3-verticale', 'm4-sigillo', 'm5-fuga', 'm6-silenzio', 'm7-caccia', 'm8-corvo', 'm9-eco']) {
   ok(missions.includes(id), `mission present: ${id}`);
 }
-ok(count(missions, /objectives: \[/g) === 8, 'each mission has an objectives array');
+ok(count(missions, /objectives: \[/g) === 9, 'each mission has an objectives array');
 const segs = missions.split(/id: 'm\d-/).slice(1);
-ok(segs.length === 8, '8 mission segments parsed');
+ok(segs.length === 9, '9 mission segments parsed');
 const validObjKinds = new Set(['reach', 'assassinate', 'collect', 'survive', 'escape', 'ghost']);
 segs.forEach((s, i) => {
   const objOnly = s.split(/spawns:/)[0]; // exclude spawn kinds from objective-kind check
@@ -75,7 +75,7 @@ segs.forEach((s, i) => {
 console.log('missions: starts in bounds + not inside colliders (approx)');
 const starts = [...missions.matchAll(/start:\s*V\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)/g)]
   .map((m) => ({ x: +m[1], y: +m[2], z: +m[3] }));
-ok(starts.length === 8, `8 mission starts parsed (found ${starts.length})`);
+ok(starts.length === 9, `9 mission starts parsed (found ${starts.length})`);
 // AABB masses mirrored from world.ts buildingBlock(...) calls: (cx,cz,w,d)
 const masses = [];
 for (const m of world.matchAll(/buildingBlock\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)/g)) {
@@ -101,13 +101,13 @@ spawns.forEach(([full, k, r], i) => {
 });
 ok(missions.includes("setFlag: 'blackout-plaza'"), "m6 setFlag 'blackout-plaza'");
 ok(missions.includes("setFlag: 'corvo-dead'"), "m8 setFlag 'corvo-dead'");
-ok(count(missions, /narrative:/g) === 3, 'narrative on m6/m7/m8');
+ok(count(missions, /narrative:/g) >= 4, 'narrative on m6/m7/m8/m9');
 ok(missions.includes('ghostBonusXp'), 'm6 ghost bonus field used');
 ok(missions.includes("target: 'target'"), 'assassinate missions reference target tag');
 ok(missions.includes('ranger') && missions.includes("'m7-caccia'"), 'm7 runner = ranger kind');
 ok(missions.includes('captain') && missions.includes("'m8-corvo'"), 'm8 boss = captain kind');
 ok(missions.includes('doc-villa'), 'm6 collect target doc-villa');
-ok(count(missions, /failOnDeath: true/g) === 8, 'failOnDeath on all 8 missions');
+ok(count(missions, /failOnDeath: true/g) === 9, 'failOnDeath on all 9 missions');
 
 console.log('framework: additive optional fields');
 for (const tok of ['spawns?', 'setFlag?', 'narrative?', 'ghostBonusXp?']) {

@@ -11,9 +11,12 @@ import { World } from '../world/world';
 import { Player } from '../player/player';
 import { ThirdPersonCamera } from '../camera/tpcamera';
 import { InputManager } from '../input/input';
-import { Enemy, EnemyKind } from '../ai/enemy';
+import { Enemy, EnemyKind, pairUp } from '../ai/enemy';
 import { Civilian, civilianSpots, SAFE_ZONES } from '../ai/civilian';
 import { AdaptiveQuality } from '../debug/adaptive';
+import { NEW_UPGRADES, upgradeEffects } from '../progression/progression';
+import { UPGRADES } from '../core/config';
+void SAFE_ZONES;
 import { CombatSystem } from '../combat/combat';
 import { canAssassinate } from '../stealth/perception';
 import { AudioEngine } from '../audio/audio';
@@ -21,8 +24,7 @@ import { SaveSystem } from '../save/save';
 import { UI } from '../ui/ui';
 import { MISSIONS } from '../missions/missions';
 import { advanceObjective, currentObjective, failMission, MissionRuntime, startMission } from '../missions/framework';
-import { addXp, availablePoints, buyUpgrade, upgradeEffects } from '../progression/progression';
-import { UPGRADES } from '../core/config';
+import { addXp, availablePoints, buyUpgrade } from '../progression/progression';
 
 export type GameScreen = 'menu' | 'playing' | 'paused' | 'over' | 'complete';
 
@@ -56,6 +58,9 @@ export class Game {
   bench: BenchRunner | null = null;
   adaptive = new AdaptiveQuality();
   lureFxT = 0;
+  private wasSliding = false;
+  private wasDodging = false;
+  private corpseHideIds = new Set<number>();
   private botT = 0; private botAtkT = 0;
   private hudT = 0; private mapT = 0; private objCache = '';
   private lastCheckpointSave = -99;
@@ -168,6 +173,18 @@ export class Game {
     this.audio.setVolume(d.settings.volume);
   }
 
+  /** crawl passages: low gaps force crouch while the capsule is inside */
+  private enforceCrawl(): void {
+    const gaps = (this.world as unknown as { crawlGaps?: Array<{ min: THREE.Vector3; max: THREE.Vector3 }> }).crawlGaps;
+    if (!gaps) return;
+    const p = this.player.pos;
+    for (const g of gaps) {
+      if (p.x >= g.min.x && p.x <= g.max.x && p.z >= g.min.z && p.z <= g.max.z && p.y < g.max.y) {
+        this.player.crouch = true;
+        return;
+      }
+    }
+  }
   /** central noise bus: generators mask player noise within 9m (distraction/cover play) */
   private pushNoise(n: NoiseEvent): void {
     const gens = (this.world as unknown as { generators?: THREE.Vector3[] }).generators;
@@ -295,6 +312,9 @@ export class Game {
     this.missionIndex = clamp(i, 0, MISSIONS.length - 1);
     const def = MISSIONS[this.missionIndex];
     this.mission = startMission(def);
+    this.corpseHideIds.clear();
+    this.bossEnraged = false;
+    this.wasSliding = false; this.wasDodging = false;
     this.detachMarkers();
     this.enemies.forEach((e) => this.scene.remove(e.rig.group));
     this.enemies = [];
@@ -321,7 +341,15 @@ export class Game {
     this.ui.hideMenu();
     this.ui.show('pause', false); this.ui.show('over', false); this.ui.show('complete', false);
     this.ui.showHud(true);
-    this.ui.toast(`${def.name} — ${def.briefing}`, 4200);
+    this.ui.setBossBar(null, 0);
+    const nar = (def as unknown as { narrative?: string }).narrative;
+    const apA = (def as unknown as { approachA?: string }).approachA;
+    const apB = (def as unknown as { approachB?: string }).approachB;
+    let brief = `${def.name} — ${def.briefing}`;
+    if (nar) brief += ` _${nar}_`;
+    this.ui.toast(brief, 4600);
+    if (apA) window.setTimeout(() => { if (this.screen === 'playing') this.ui.toast(`VIA A — ${apA}`, 4200); }, 4800);
+    if (apB) window.setTimeout(() => { if (this.screen === 'playing') this.ui.toast(`VIA B — ${apB}`, 4200); }, 9200);
     this.save.data.checkpoint = { x: def.start.x, y: def.start.y, z: def.start.z, missionId: def.id };
     this.save.save();
   }
@@ -356,6 +384,17 @@ export class Game {
     if (missionId === 'm3-verticale' || missionId === 'm4-sigillo') { mk('elite', 3); mk('guard', 4); }
     if (missionId === 'm5-fuga') { mk('elite', 0); mk('elite', 1); mk('captain', 4); }
     if (missionId === 'm8-corvo') this.setupBoss();
+    // patrol pairs: consecutive guards coordinate (no omniscience — lastKnown only)
+    for (let i = 0; i + 1 < this.enemies.length; i += 2) {
+      const a = this.enemies[i]; const b = this.enemies[i + 1];
+      if (!(a as unknown as { isBoss?: boolean }).isBoss && !(b as unknown as { isBoss?: boolean }).isBoss &&
+        !(a as unknown as { isTarget?: boolean }).isTarget && !(b as unknown as { isTarget?: boolean }).isTarget) {
+        pairUp(a, b);
+      }
+    }
+    // apply upgrade effects (incl. phase-3 slide/lure/falce)
+    const eff0 = upgradeEffects(this.xp);
+    (this.player as unknown as { slideDur?: number }).slideDur = 0.7 * eff0.slideMul;
     // reset lamps to profile (missions must not inherit sabotage), then blackout flag
     this.world.lamps.forEach((l, i) => { l.visible = i < this.profile.lampCount; });
     // apply blackout world-flag (m6 consequence): plaza lamps stay off
@@ -445,6 +484,7 @@ export class Game {
 
   pause(): void {
     if (this.screen !== 'playing') return;
+    this.input.releaseAll();
     this.screen = 'paused';
     this.ui.show('pause', true);
   }
@@ -457,6 +497,8 @@ export class Game {
   private onDeath(): void {
     if (this.screen !== 'playing') return;
     this.save.saveDie();
+    this.input.releaseAll();
+    this.ui.setBossBar(null, 0);
     this.screen = 'over';
     this.ui.showHud(false);
     this.ui.show('over', true);
@@ -467,6 +509,7 @@ export class Game {
   private completeMission(): void {
     const rt = this.mission;
     rt.done = true;
+    this.ui.setBossBar(null, 0);
     const ghostBonus = rt.ghost ? ((rt.def as unknown as { ghostBonusXp?: number }).ghostBonusXp ?? 0) : 0;
     const { levels } = addXp(this.xp, rt.def.rewardXp + ghostBonus);
     if (rt.def.rewardTools?.smoke) this.smoke += rt.def.rewardTools.smoke;
@@ -477,7 +520,7 @@ export class Game {
     d.xp = this.xp.xp + (this.xp.level - 1) * 140;
     d.upgrades = { ...this.xp.upgrades };
     d.inventory.smoke = this.smoke; d.inventory.knives = this.knives;
-    d.inventory.lure = Math.min(3, (d.inventory.lure ?? 1) + 1); // restock lure
+    d.inventory.lure = Math.min(upgradeEffects(this.xp).maxLure, (d.inventory.lure ?? 1) + 1); // restock lure
     d.bestGhost[rt.def.id] = (d.bestGhost[rt.def.id] ?? true) && rt.ghost;
     // world-state consequences (phase-3 mini-campaign persistence)
     const flag = (rt.def as unknown as { setFlag?: string }).setFlag;
@@ -514,6 +557,8 @@ export class Game {
       case 'btn-restart': this.ui.show('pause', false); this.startMission(this.missionIndex); break;
       case 'btn-quit': case 'btn-quit2': case 'btn-quit3':
         this.screen = 'menu';
+        this.input.releaseAll();
+        this.ui.setBossBar(null, 0);
         this.ui.show('pause', false); this.ui.show('over', false); this.ui.show('complete', false);
         this.ui.showHud(false); this.ui.show('menu', true);
         this.refreshMenuSave(); this.audio.stopMusic();
@@ -559,8 +604,9 @@ export class Game {
   private openProgression(): void {
     this.ui.show('progression', true);
     const el = this.ui.root.querySelector('#prog-body')!;
+    const all = [...UPGRADES, ...NEW_UPGRADES];
     el.innerHTML = `<div style="margin-bottom:8px">Livello ${this.xp.level} · Punti disponibili: <b>${availablePoints(this.xp)}</b></div>` +
-      UPGRADES.map((u) => {
+      all.map((u) => {
         const lv = this.xp.upgrades[u.id] ?? 0;
         return `<div style="border:1px solid #3a4a63;border-radius:8px;padding:8px;margin-bottom:6px"><b>${u.name}</b> ${'●'.repeat(lv)}${'○'.repeat(u.max - lv)}<br><span style="color:#9fb0c9;font-size:13px">${u.desc}</span><br><button data-act="buy-${u.id}" style="margin-top:6px;pointer-events:auto;background:#1c2940;color:#fff;border:1px solid #3a4a63;border-radius:8px;padding:6px 12px">Migliora</button></div>`;
       }).join('');
@@ -672,13 +718,21 @@ export class Game {
     }
   }
 
-  /** hidden = crouched + still + unseen by every living enemy (2Hz). Enables fast alarm decay. */
+  /** hidden = crouched + still + unseen by every living enemy (2Hz). Enables fast alarm decay.
+   *  Hide spots (dumpster/wardrobe/bush): crouched inside radius counts as hidden. */
   private updateHidden(dt: number): void {
     this.hiddenT += dt;
     if (this.hiddenT < 0.5) return;
     this.hiddenT = 0;
     const p = this.player;
-    let h = p.crouch && p.moving < 0.6 && !p.dead;
+    // hide-spot check: reusable props, crouch inside radius
+    let inHide = false;
+    for (const it of this.world.interactables) {
+      if (it.kind !== 'hide' || it.taken) continue;
+      const d = Math.hypot(it.pos.x - p.pos.x, it.pos.z - p.pos.z);
+      if (d < it.radius && p.crouch) { inHide = true; break; }
+    }
+    let h = (p.crouch && p.moving < 0.6 && !p.dead) || (inHide && p.moving < 1.2 && !p.dead);
     if (h) {
       for (const e of this.enemies) {
         if (e.dead) continue;
@@ -835,7 +889,7 @@ export class Game {
     if (o?.kind === 'assassinate') {
       const need = o.count ?? 1;
       if (this.mission.progress >= need && advanceObjective(this.mission)) this.completeMission();
-      else this.ui.toast('Obiettivo completato — sparisci!');
+      else { this.ui.toast('Obiettivo completato — sparisci!'); this.ui.flashPrompt(); }
     }
   }
 
@@ -853,15 +907,34 @@ export class Game {
     const it = this.nearestInteract();
     if (!it) return;
     const w = this.world.interactables.find((i) => i.id === it.id)!;
+    // hide spots are reusable: never consumed, mesh stays
+    if (w.kind === 'hide') {
+      this.ui.toast('Nascosto — resta accovacciato e fermo');
+      this.audio.ui();
+      return;
+    }
+    // corpse hiding: crouch over a body to stash it (no more alerts from it)
+    if ((w as unknown as { corpseId?: number }).corpseId !== undefined) {
+      const c = this.enemies.find((e) => e.id === (w as unknown as { corpseId: number }).corpseId);
+      if (c && c.dead && !c.hiddenBody) {
+        c.hiddenBody = true;
+        w.taken = true;
+        if (w.mesh) w.mesh.visible = false;
+        this.ui.killfeed('Corpo nascosto');
+        this.audio.pickup();
+        this.save.save();
+      }
+      return;
+    }
     w.taken = true;
     if (w.mesh) w.mesh.visible = false;
     this.audio.pickup();
     if (it.id === 'relic') this.save.data.inventory.relic = true;
     if (it.id === 'documento' || it.id === 'doc' || it.id === 'doc-villa') this.save.data.inventory.doc = true;
     // exploration caches: real gameplay value, capped
-    if (it.id === 'cache-smoke' || it.id === 'cache-garden') { this.smoke = Math.min(6, this.smoke + 2); this.ui.toast('Fumogeni +2'); }
-    if (it.id === 'cache-knife' || it.id === 'cache-attic') { this.knives = Math.min(8, this.knives + 2); this.ui.toast('Coltelli +2'); }
-    if (it.id === 'intel' || it.id === 'cache-canal') {
+    if (it.id === 'cache-smoke' || it.id === 'cache-garden' || it.id === 'cache-villa') { this.smoke = Math.min(6, this.smoke + 2); this.ui.toast('Fumogeni +2'); }
+    if (it.id === 'cache-knife' || it.id === 'cache-attic' || it.id === 'cache-nw') { this.knives = Math.min(8, this.knives + 2); this.ui.toast('Coltelli +2'); }
+    if (it.id === 'intel' || it.id === 'cache-canal' || it.id === 'cache-deep' || it.id === 'cache-stall' || it.id === 'intel-eco-1' || it.id === 'intel-eco-2') {
       const { levels } = addXp(this.xp, 60);
       this.ui.toast(levels > 0 ? `Intel +60 XP — punto abilità guadagnato!` : 'Intel +60 XP');
     }
@@ -893,7 +966,7 @@ export class Game {
       const want = (o.target as string) ?? '';
       if (want === it.id || (want === 'documento' && it.id === 'doc') || o.target === undefined) {
         if (advanceObjective(this.mission)) this.completeMission();
-        else this.ui.toast('Oggetto recuperato — vai al prossimo obiettivo');
+        else { this.ui.toast('Oggetto recuperato — vai al prossimo obiettivo'); this.ui.flashPrompt(); }
       }
     }
     this.save.save();
@@ -907,6 +980,7 @@ export class Game {
     const tz = p.pos.z + -Math.cos(p.yaw) * 8;
     const gy = this.world.groundHeight(tx, tz);
     this.save.data.inventory.lure--;
+    this.audio.lureClack();
     this.audio.swoosh();
     this.burst(new THREE.Vector3(tx, gy + 0.5, tz), 0x9aa7bd, 8);
     // guards investigate the clatter; civilians glance
@@ -919,9 +993,15 @@ export class Game {
     const p = this.player as unknown as { specialUnlocked?: boolean };
     if (!this.save.data.unlockedSpecial && !p.specialUnlocked) { this.ui.toast('Falce Lunare: completa la missione 5'); return; }
     p.specialUnlocked = true;
+    // Luna Piena upgrade scales special damage only (temp swap, no power creep on basics)
+    const eff = upgradeEffects(this.xp);
+    const baseMul = this.player.dmgMul;
+    this.player.dmgMul = baseMul * eff.specialMul;
     const res = this.combat.trySpecial(this.player, this.enemies, this.cam);
+    this.player.dmgMul = baseMul;
     if (res.hits > 0) {
       this.hitstop = Math.max(this.hitstop, 0.08);
+      this.save.bumpStat('kills', res.kills);
       this.pushNoise({ x: this.player.pos.x, y: this.player.pos.y, z: this.player.pos.z, radius: 22, loudness: 1.3, kind: 'fight', t: this.time });
       if (res.kills > 0) { this.ui.killfeed('FALCE LUNARE!'); this.mission.progress += res.kills; this.checkAssassinateObjective(); }
     } else {
@@ -933,6 +1013,7 @@ export class Game {
     if (this.smoke <= 0) { this.ui.toast('Nessun fumogeno'); return; }
     this.smoke--;
     this.popSmoke(this.player.pos);
+    this.audio.smokeHiss();
     this.audio.land(false);
     // break contact: all enemies lose player, suspicion halved
     for (const e of this.enemies) {
@@ -1009,6 +1090,15 @@ export class Game {
 
     // player
     this.player.update(dt, inp, this.world, this.cam.yaw);
+    this.enforceCrawl();
+    // dodge roll audio (rising edge)
+    const dodgingNow = this.player.dodgeT > 0;
+    if (dodgingNow && !this.wasDodging) this.audio.roll();
+    this.wasDodging = dodgingNow;
+    // slide entry whoosh (rising edge)
+    const slidingNow = (this.player as unknown as { sliding?: boolean }).sliding === true;
+    if (slidingNow && !this.wasSliding) this.audio.sprintWhoosh();
+    this.wasSliding = slidingNow;
     this.cam.update(dt, inp.state, this.player.pos, this.world, this.player.crouch, this.player.sprinting);
 
     // fixed-Hz brain ticks per enemy (profile-driven) + AI cost measurement
@@ -1022,11 +1112,11 @@ export class Game {
       e.tick(this.aiInterval, now, prefs, this.world, this.audio,
         (en) => this.onSpotted(en),
         () => { this.ui.toast('…ti hanno perso di vista. Nasconditi!'); this.audio.sting('lost'); });
-      // corpse discovery (guards investigate; civilians scream)
+      // corpse discovery (guards investigate; civilians scream; hidden bodies skipped)
       for (const c of this.enemies) {
-        if (c.dead) {
-          e.seeCorpse(c.pos.x, c.pos.z);
-          for (const civ of this.civilians) civ.seeCorpse(c.pos.x, c.pos.z);
+        if (c.dead && !c.hiddenBody) {
+          e.seeCorpse(c.pos.x, c.pos.z, false);
+          for (const civ of this.civilians) civ.seeCorpse(c.pos.x, c.pos.z, false);
         }
       }
     }
@@ -1039,6 +1129,15 @@ export class Game {
     for (const c of this.civilians) {
       if (civBrain) c.slowTick(0.5, this.world);
       c.update(dt, this.world);
+      // personal-space separation vs player + nearest living guard (cheap: few civs)
+      c.pushOut(this.player.pos.x, this.player.pos.z, 0.45);
+      let bd = 99; let bx = 0; let bz = 0;
+      for (const e of this.enemies) {
+        if (e.dead) continue;
+        const d = Math.hypot(e.pos.x - c.pos.x, e.pos.z - c.pos.z);
+        if (d < bd) { bd = d; bx = e.pos.x; bz = e.pos.z; }
+      }
+      if (bd < 3) c.pushOut(bx, bz, 0.45);
     }
     // noises -> hearing (immediate, cheap: dist check)
     for (const n of this.noises) {
@@ -1086,8 +1185,26 @@ export class Game {
     for (const e of this.enemies) if (!e.dead) maxS = Math.max(maxS, e.suspicion / 100);
     this.ui.setDetection(maxS, anyCombat);
 
-    // visuals per frame
-    for (const e of this.enemies) e.syncVisual(dt);
+    // visuals per frame + corpse-hide registration (crouch over a body to stash it)
+    for (const e of this.enemies) {
+      e.syncVisual(dt);
+      if (e.dead && !this.corpseHideIds.has(e.id)) {
+        this.corpseHideIds.add(e.id);
+        this.world.interactables.push({
+          id: `corpse-${e.id}`, pos: new THREE.Vector3(e.pos.x, e.pos.y + 1, e.pos.z),
+          radius: 2.2, label: 'Nascondi il corpo', kind: 'corpse', taken: false,
+          corpseId: e.id,
+        } as unknown as (typeof this.world.interactables)[number]);
+      }
+    }
+    // drop consumed corpse entries for hidden bodies
+    for (const it of this.world.interactables) {
+      const cid = (it as unknown as { corpseId?: number }).corpseId;
+      if (cid !== undefined && !it.taken) {
+        const c = this.enemies.find((x) => x.id === cid);
+        if (c?.hiddenBody) it.taken = true;
+      }
+    }
     this.tickBoss(dt);
     this.resolveRangerKnives();
     this.updateMarkers();
@@ -1106,6 +1223,16 @@ export class Game {
         `Liv ${this.xp.level} · +${this.mission.def.rewardXp} XP alla fine`, this.smoke, this.knives);
       this.ui.setContext(this.assassPrompt !== null, this.nearestInteract() !== null, this.smoke, this.knives);
       this.updateThreat();
+      // noise ring: silent / moving loud / fighting
+      this.ui.setNoiseRing(anyCombat ? 2 : (this.player.sprinting || this.player.moving > 6) ? 1 : 0);
+      // boss bar (m8): track Il Corvo
+      const boss = this.enemies.find((e) => (e as unknown as { isBoss?: boolean }).isBoss && !e.dead);
+      if (boss && this.mission.def.id === 'm8-corvo') {
+        this.ui.setBossBar(this.bossEnraged ? 'IL CORVO — FASE 2' : 'IL CORVO', Math.max(0, boss.hp / boss.maxHp));
+      } else if (this.mission.def.id === 'm8-corvo' && this.mission.objIndex === 0) {
+        const bossAny = this.enemies.find((e) => (e as unknown as { isBoss?: boolean }).isBoss);
+        if (bossAny) this.ui.setBossBar('IL CORVO', 1);
+      }
       // stealth tier HUD: highest enemy suspicion tier
       let tier = 0; let tlabel = '';
       for (const e of this.enemies) {
@@ -1135,11 +1262,28 @@ export class Game {
     inp.lateClear();
   }
 
-  /** coordinated alert: spotter shouts, nearby guards join the hunt */
+  /** coordinated alert: spotter shouts, partner + nearby guards join (lastKnown only) */
   private onSpotted(spotter: Enemy): void {
     this.mission.spotted = true; this.mission.ghost = false;
     this.ui.killfeed(`Occhio! Individuato dalla guardia #${spotter.id}!`);
     this.audio.bark('alert'); this.audio.sting('combat');
+    // patrol partner investigates the spotter's lastKnown (never live player pos)
+    const partner = this.enemies.find((e) => e.id === spotter.partnerId);
+    spotter.alertPartner(partner ?? null);
+    // captain calls reinforcements: wake nearby patrols
+    if (spotter.wantsReinforce()) {
+      spotter.callReinforcements = false;
+      for (const e of this.enemies) {
+        if (e === spotter || e.dead || e.inCombat) continue;
+        const d = Math.hypot(e.pos.x - spotter.pos.x, e.pos.z - spotter.pos.z);
+        if (d < 40) {
+          e.investigate.copy(spotter.lastKnown);
+          e.suspicion = Math.max(e.suspicion, 80);
+          if (e.state === 'PATROL' || e.state === 'IDLE' || e.state === 'RETURNING') e.state = 'INVESTIGATING';
+        }
+      }
+      this.ui.killfeed('Il capitano chiama rinforzi!');
+    }
     const shoutR = spotter.kind === 'captain' ? 34 : 22;
     for (const e of this.enemies) {
       if (e === spotter || e.dead || e.inCombat) continue;
@@ -1227,13 +1371,13 @@ export class Game {
         // special: m3 roof needs height
         if (rt.def.id === 'm3-verticale' && o.id === 'climb-roof' && p.y < 7) { /* not yet */ }
         else if (advanceObjective(rt)) this.completeMission();
-        else { this.ui.toast('Obiettivo completato!'); this.audio.pickup(); }
+        else { this.ui.toast('Obiettivo completato!'); this.audio.pickup(); this.ui.flashPrompt(); }
       }
     } else if (o.kind === 'survive') {
       const need = o.count ?? 45;
       rt.progress = rt.time;
       if (this.alarmT > 0) { this.alarmT -= dt; if (Math.floor(this.alarmT) % 10 === 0) this.alertAll(); }
-      if (rt.time >= need && advanceObjective(rt)) { /* next: escape */ this.ui.toast('Sei sopravvissuto — ora sparisci!'); }
+      if (rt.time >= need && advanceObjective(rt)) { /* next: escape */ this.ui.toast('Sei sopravvissuto — ora sparisci!'); this.ui.flashPrompt(); }
     } else if (o.kind === 'escape' && o.target instanceof THREE.Vector3) {
       const d = Math.hypot(o.target.x - p.x, o.target.z - p.z);
       const nearEnemy = this.enemies.some((e) => !e.dead && Math.hypot(e.pos.x - p.x, e.pos.z - p.z) < 12);

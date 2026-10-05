@@ -10,6 +10,11 @@ const SUITES = [
   './world.test.mjs',
   './ux.test.mjs',
   './perf.test.mjs',
+  './p3-movement.test.mjs',
+  './p3-combat.test.mjs',
+  './p3-stealth.test.mjs',
+  './p3-world.test.mjs',
+  './p3-uxperf.test.mjs',
 ];
 
 let pass = 0; let fail = 0; let skip = 0;
