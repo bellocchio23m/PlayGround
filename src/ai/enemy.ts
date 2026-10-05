@@ -49,6 +49,14 @@ export const BRUTE_CHARGE_MIN = 6;
 export const BRUTE_CHARGE_MAX = 12;
 /** vertical gap above which ground enemies wait below instead of pushing walls. */
 export const UNREACHABLE_DY = 3;
+/** seconds a guard faces a thrown-lure impact before walking to investigate. */
+export const DISTRACT_FACE_S = 2;
+/** max partner distance for coordinated INVESTIGATING (meters, 2D). */
+export const PARTNER_SHARE_DIST = 30;
+/** corner-peek sidestep when INVESTIGATING arrives with no visibility (meters). */
+export const CORNER_PEEK_DIST = 2;
+/** seconds stuck unreachable (dy>3) before dropping to a local SEARCHING ring. */
+export const UNREACHABLE_TIMEOUT_S = 6;
 
 export type EnemyKind = 'guard' | 'elite' | 'captain' | 'brute' | 'ranger';
 
@@ -73,6 +81,17 @@ const WINDUP: Record<EnemyKind, number> = {
 };
 
 let nextId = 1;
+
+/**
+ * Wire two guards as a patrol pair: sets both partnerId fields. Central calls
+ * once at spawn (e.g. pairUp(guards[0], guards[1])). Either guard entering
+ * ALERT/COMBAT can then share via alertPartner() — partner investigates the
+ * spotter's lastKnown within PARTNER_SHARE_DIST, never live player pos.
+ */
+export function pairUp(e1: Enemy, e2: Enemy): void {
+  e1.setPartner(e2.id);
+  e2.setPartner(e1.id);
+}
 
 export class Enemy {
   id = nextId++;
@@ -107,6 +126,26 @@ export class Enemy {
   unseenT = 99;
   /** remaining corpse-spiral time (0 = inactive). Uses searchT/ringT + lastKnown=corpse. */
   corpseT = 0;
+  /** thrown-lure distraction: seconds remaining facing investigate before moving. */
+  distractedT = 0;
+  /** patrol partner id for coordinated pairs (null = solo). Central wires via pairUp(). */
+  partnerId: number | null = null;
+  /**
+   * Reinforcement request latch. Set when a captain spots (calloutT-gated in
+   * spot()); central reads wantsReinforce() per tick and resets to false after
+   * spawning/waking nearby patrols. NEVER spawns inside this class.
+   */
+  callReinforcements = false;
+  /** seconds continuously unreachable overhead (dy>3). Resets when reachable. */
+  unreachableT = 0;
+  /** corner-peek bookkeeping: true after the one 2m sidestep for this stimulus. */
+  peekDone = false;
+  /**
+   * Corpse-hiding flag (ON THE CORPSE ITSELF). Central sets true when the player
+   * hides this body (crouch+interact); observers' seeCorpse() skips hidden
+   * bodies so a stashed corpse never re-alerts the squad.
+   */
+  hiddenBody = false;
   // --- ranged attacks (flags only: central spawns/resolves the projectile) ---
   /** set true the tick a knife leaves the hand. CENTRAL MUST reset to false after resolving. */
   threwKnife = false;
@@ -153,6 +192,10 @@ export class Enemy {
     const d = Math.hypot(n.x - this.pos.x, n.z - this.pos.z);
     if (d > n.radius) return;
     this.investigate.set(n.x, 0, n.z);
+    this.peekDone = false; // fresh stimulus: corner-peek available again
+    // Thrown-lure impact nearby: stop, face the clatter DISTRACT_FACE_S seconds,
+    // THEN investigate. Tactical pause, no state change beyond the normal path.
+    if (n.kind === 'lure') this.distractedT = DISTRACT_FACE_S;
     if (this.state === AIState.Patrol || this.state === AIState.Idle || this.state === AIState.Returning) {
       this.state = AIState.Suspicious;
       this.suspicion = Math.max(this.suspicion, 35);
@@ -161,8 +204,9 @@ export class Enemy {
     }
   }
 
-  seeCorpse(x: number, z: number): void {
+  seeCorpse(x: number, z: number, hidden = false): void {
     if (this.dead || this.inCombat) return;
+    if (hidden) return; // stashed corpse: central passes corpse.hiddenBody here
     const d = Math.hypot(x - this.pos.x, z - this.pos.z);
     if (d < CFG.stealth.corpseNoticeDist && !this.seen) {
       this.seen = true;
@@ -172,7 +216,50 @@ export class Enemy {
       this.corpseT = CORPSE_SEARCH_S; // 4s spiral around the body, then give up
       this.state = AIState.Investigating;
       this.suspicion = 80;
+      this.peekDone = false;
+      this.distractedT = 0;
     }
+  }
+
+  /** pair this guard with another id (central calls pairUp() once at spawn). */
+  setPartner(id: number | null): void {
+    this.partnerId = id;
+  }
+
+  /**
+   * Patrol-pair coordination WITHOUT omniscience: if this guard just entered
+   * ALERT/COMBAT, central calls this with the paired Enemy instance; the partner
+   * (if within PARTNER_SHARE_DIST) goes to INVESTIGATING at THIS guard's
+   * lastKnown — never the player's live position. Returns true if shared.
+   * Central wiring: on onSpotted(spotter), look up partner by spotter.partnerId
+   * and call spotter.alertPartner(partner). No allocations, no registry here.
+   */
+  alertPartner(partner: Enemy | null | undefined): boolean {
+    if (!partner || partner.dead) return false;
+    if (this.partnerId === null || partner.id !== this.partnerId) return false;
+    if (this.state !== AIState.Alert && this.state !== AIState.Combat) return false;
+    if (partner.inCombat) return false; // never override an engaged partner
+    const dx = partner.pos.x - this.pos.x; const dz = partner.pos.z - this.pos.z;
+    if (dx * dx + dz * dz > PARTNER_SHARE_DIST * PARTNER_SHARE_DIST) return false;
+    // share MEMORY only (anti-omniscience): partner hunts where WE last saw.
+    partner.investigate.copy(this.lastKnown);
+    partner.lastKnown.copy(this.lastKnown);
+    partner.lastKnownT = this.lastKnownT;
+    partner.suspicion = Math.max(partner.suspicion, 60);
+    partner.state = AIState.Investigating;
+    partner.waitT = 0;
+    partner.peekDone = false;
+    return true;
+  }
+
+  /**
+   * Reinforcement request for central: true when a captain in combat latched
+   * callReinforcements (set once per callout in spot()). Central should
+   * spawn/wake nearby patrols then reset `callReinforcements = false`.
+   * This class NEVER spawns — flag only, fixed-Hz safe.
+   */
+  wantsReinforce(): boolean {
+    return this.kind === 'captain' && this.inCombat && this.callReinforcements;
   }
 
   takeDamage(dmg: number, fromYaw: number, heavy: boolean, audio: AudioEngine): boolean {
@@ -191,6 +278,7 @@ export class Enemy {
     this.state = AIState.Combat;
     this.lastKnownT = performance.now() / 1000;
     this.yaw = fromYaw;
+    this.distractedT = 0;
     return false;
   }
 
@@ -212,6 +300,7 @@ export class Enemy {
     this.state = AIState.Alert;
     if (this.calloutT <= 0) {
       this.calloutT = CALLOUT_CD_S;
+      if (this.kind === 'captain') this.callReinforcements = true; // latched; central consumes
       onSpotted(this);
     }
   }
@@ -301,6 +390,15 @@ export class Enemy {
     // UI readability tier (0 calm <35, 1 curious 35-69, 2 alarmed 70+).
     this.suspicionTier = this.suspicion >= 70 ? 2 : this.suspicion >= 35 ? 1 : 0;
 
+    // Thrown-lure distraction turn: face the impact point first (cheap, tactical).
+    // Movement in INVESTIGATING is held while distractedT > 0 (see below).
+    if (this.distractedT > 0) {
+      this.distractedT -= dt;
+      if (this.state === AIState.Suspicious || this.state === AIState.Investigating) {
+        this.face(this.investigate, 10, dt);
+      }
+    }
+
     // Vertical awareness: prey >3m above and close in 2D = unreachable ledge/roof.
     // Don't vibrate against the wall: drop to SEARCHING and wait below their xz.
     // Rangers keep throwing from below; guards rely on the shared callout.
@@ -310,6 +408,19 @@ export class Enemy {
       this.investigate.set(player.pos.x, 0, player.pos.z);
       this.lastKnown.copy(player.pos); this.lastKnownT = now;
       this.searchT = 0; this.ringT = 0;
+    }
+    // Vertical fallback: stop wall-hugging forever. After UNREACHABLE_TIMEOUT_S
+    // continuously unreachable (dy > UNREACHABLE_DY), drop to a local SEARCHING
+    // ring at our own base + decay suspicion. No allocations, fixed-Hz safe.
+    if (dy > UNREACHABLE_DY) this.unreachableT += dt;
+    else this.unreachableT = 0;
+    if (this.unreachableT > UNREACHABLE_TIMEOUT_S &&
+      (this.state === AIState.Combat || this.state === AIState.Alert || this.state === AIState.Searching)) {
+      this.unreachableT = 0;
+      this.state = AIState.Searching;
+      this.investigate.set(this.pos.x, 0, this.pos.z); // ring at base (where we stand)
+      this.searchT = 0; this.ringT = 0;
+      this.suspicion = Math.max(0, this.suspicion - 30);
     }
 
     switch (this.state) {
@@ -326,9 +437,10 @@ export class Enemy {
         break;
       }
       case AIState.Suspicious:
-        // stare at stimulus, small step
+        // stare at stimulus, small step (distraction turn faces via the block above too)
+        this.face(this.investigate, 8, dt);
         if (this.suspicion <= 0) this.state = AIState.Patrol;
-        else if (this.suspicion > 70) { this.state = AIState.Investigating; }
+        else if (this.suspicion > 70) { this.state = AIState.Investigating; this.peekDone = false; this.waitT = 0; }
         break;
       case AIState.Investigating: {
         if (this.corpseT > 0) {
@@ -351,7 +463,25 @@ export class Enemy {
           if (this.suspicion >= CFG.stealth.alertThreshold) { this.spot(now, onSpotted); }
           break;
         }
+        // Distraction turn holds movement: face first (handled above), walk after.
+        if (this.distractedT > 0) {
+          if (this.suspicion >= CFG.stealth.alertThreshold) { this.spot(now, onSpotted); }
+          break;
+        }
         if (this.moveToward(this.investigate, this.speed * 0.7, dt, world)) {
+          // CORNER-PEEK: first arrival with no visibility = one 2m perpendicular
+          // sidestep (reuses strafeDir) before the give-up timer. Checks
+          // doors/corners without pathfinding. No allocations.
+          if (!this.peekDone) {
+            this.peekDone = true;
+            this.waitT = 0;
+            const fx = -Math.sin(this.yaw); const fz = -Math.cos(this.yaw);
+            this.investigate.set(
+              this.pos.x + -fz * CORNER_PEEK_DIST * this.strafeDir, 0,
+              this.pos.z + fx * CORNER_PEEK_DIST * this.strafeDir);
+            if (this.suspicion >= CFG.stealth.alertThreshold) { this.spot(now, onSpotted); }
+            break;
+          }
           this.waitT += dt;
           this.yaw += dt * 1.5; // look around
           if (this.waitT > 2.5) {

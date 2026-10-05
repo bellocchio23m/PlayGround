@@ -44,6 +44,8 @@ export class Civilian {
   hideT = 0;
   dead = false;
   screamCD = 0;
+  /** personal-space radius (meters). Central resolves overlap via pushOut(). */
+  avoidR = 0.9;
   /**
    * Corpse-scream hook. Central wires it to a loud noise event (which alerts
    * guards via the normal hearing path). Undefined = scream silently (flee only).
@@ -99,9 +101,27 @@ export class Civilian {
     }
   }
 
+  /**
+   * Separation resolver (central-owned spatial query): push this civilian out
+   * of overlap with a circle at (x,z,r) — typically the player + nearest
+   * enemies, called per frame (few civilians = cheap). Positional only, no
+   * allocations, no world queries. minD = r + avoidR.
+   */
+  pushOut(x: number, z: number, r: number): void {
+    const dx = this.pos.x - x; const dz = this.pos.z - z;
+    const minD = r + this.avoidR;
+    const d2 = dx * dx + dz * dz;
+    if (d2 >= minD * minD || d2 < 1e-8) return;
+    const d = Math.sqrt(d2);
+    const push = (minD - d) / d;
+    this.pos.x += dx * push;
+    this.pos.z += dz * push;
+  }
+
   /** corpse discovery (distance-only, no LOS): scream once, then run. */
-  seeCorpse(x: number, z: number): void {
+  seeCorpse(x: number, z: number, hidden = false): void {
     if (this.dead) return;
+    if (hidden) return; // stashed corpse (corpse.hiddenBody): no scream, no flee
     const d = Math.hypot(x - this.pos.x, z - this.pos.z);
     if (d > CFG.stealth.corpseNoticeDist) return;
     if (this.screamCD > 0) return;
