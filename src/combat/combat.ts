@@ -31,6 +31,19 @@
 //  - PERF (obj 20 / rules): no per-frame allocations in hit resolution.
 //    Hot paths use only primitives; lastHitDir allocates ONLY on a landed
 //    hit (event, not per-frame); debugLastResolution is a reused object.
+//  - DASH LATCH FIX (live SCATTO issue): dodge lasts 0.42s, attacks unlock
+//    only at dodgeT<=0 (or <0.2 late path) while dodgeCD counts 0.8->0, so by
+//    attack time dodgeCD is often <0.3 and the old heuristic missed. Central
+//    now calls noteDodgeCancel() when it cancels dodge into attack; the latch
+//    (dashArmedUntilMs = now + 0.6s) makes isDashAttack() true for 0.6s wall
+//    clock. Old dodgeCD>0.3 stays as fallback. No per-frame cost (lazy check
+//    + eager clear in tick/decayWall). See WIRING CONTRACT on noteDodgeCancel.
+//  - TAKEDOWNS: updatePlayerAttack(p, e, cam, ctx?) — ctx {airborne, crouch}
+//    backward-compat optional. Kill + airborne => 'AEREO' (TETTO drop);
+//    kill + crouch => 'COPERTURA' (+1.1x dmg). 'FINISHER' still first.
+//  - LEDGE/HANG: assassRangeBonus(airborne) pure => 1.6 / 0 for central range.
+//  - HIT-STOP: hitstopFor(result) pure => kill 0.09 / perfect 0.08 / hit 0.045.
+//  - PARRY QUALITY: parryQuality(parryT) pure => perfect(>0.3)/good(>0.1)/late.
 import * as THREE from 'three';
 import { CFG } from '../core/config';
 import { angleDiff } from '../core/utils';
@@ -73,7 +86,62 @@ export const COMBAT_TUNING = {
   specialDmgMul: 1.6,
   specialCost: 35,
   specialCooldown: 6,
+  /** Dash-latch window (s): noteDodgeCancel() arms SCATTO for this long. */
+  dashLatchWindow: 0.6,
+  /** Crouch-cover kill bonus (COPERTURA takedown). */
+  crouchDmgMul: 1.1,
+  /** Ledge/hang assassination range bonus when airborne (TETTO -> AEREO). */
+  assassRangeAirBonus: 1.6,
+  /** Hit-stop guidance (s): central reads via hitstopFor(). */
+  hitstopKill: 0.09,
+  hitstopHit: 0.045,
+  hitstopPerfect: 0.08,
 } as const;
+
+/** Optional caller context for updatePlayerAttack (backward compat: omit entirely). */
+export interface AttackContext {
+  /** True while airborne / falling onto the target (TETTO drop -> 'AEREO' on kill). */
+  airborne?: boolean;
+  /** True while crouched (cover kill -> 'COPERTURA' on kill + 1.1x dmg). */
+  crouch?: boolean;
+}
+
+/**
+ * Ledge/hang takedown range helper (pure, no alloc).
+ * Central assassination wiring: effectiveRange = base + assassRangeBonus(airborne).
+ * Returns 1.6 when airborne (diving from a ledge/hang), else 0.
+ */
+export function assassRangeBonus(airborne: boolean): number {
+  return airborne ? COMBAT_TUNING.assassRangeAirBonus : 0;
+}
+
+/** Parry-window readability (pure): parryT>0.3 perfect, >0.1 good, else late. */
+export function parryQuality(parryT: number): 'perfect' | 'good' | 'late' {
+  if (parryT > COMBAT_TUNING.perfectParryT) return 'perfect';
+  if (parryT > COMBAT_TUNING.parryMinT) return 'good';
+  return 'late';
+}
+
+export type HitstopResult =
+  | 'kill' | 'hit' | 'perfect' | 'miss'
+  | { killed?: boolean; perfect?: boolean; hit?: boolean; kills?: number; hits?: number };
+
+/**
+ * Hit-stop guidance in seconds (pure, single place for central timing):
+ * kill 0.09, perfect 0.08, hit 0.045, otherwise 0. Kill outranks perfect.
+ */
+export function hitstopFor(result: HitstopResult): number {
+  if (typeof result === 'string') {
+    if (result === 'kill') return COMBAT_TUNING.hitstopKill;
+    if (result === 'perfect') return COMBAT_TUNING.hitstopPerfect;
+    if (result === 'hit') return COMBAT_TUNING.hitstopHit;
+    return 0;
+  }
+  if (result.killed === true || (result.kills !== undefined && result.kills > 0)) return COMBAT_TUNING.hitstopKill;
+  if (result.perfect === true) return COMBAT_TUNING.hitstopPerfect;
+  if (result.hit === true || (result.hits !== undefined && result.hits > 0)) return COMBAT_TUNING.hitstopHit;
+  return 0;
+}
 
 function nowMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') return performance.now();
@@ -95,18 +163,51 @@ export class CombatSystem {
   debugLastResolution: { range: number; phase: number; facingDiff: number; dealt: boolean } = {
     range: 0, phase: 0, facingDiff: 0, dealt: false,
   };
+  /** last resolved hit label (FINISHER/AEREO/COPERTURA/PERFETTA/RIPOSTE/SCATTO/…) — central reads for banners. */
+  lastLabel = '';
 
   private perfectActive = false;
   private specialLastMs = -1e12;
   private lastWallMs = 0;
+  /**
+   * Dash latch (wall-clock expiry, ms timestamp).
+   * WIRING CONTRACT (central, e.g. game.ts — combat.ts never touches player.ts):
+   *   when central cancels dodge into attack (the `if (this.dodgeT > 0) this.dodgeT = 0`
+   *   branch in Player.update, dodgeT<0.2 path), it MUST call combat.noteDodgeCancel()
+   *   immediately after starting the attack. isDashAttack() then returns true for
+   *   COMBAT_TUNING.dashLatchWindow (0.6s) regardless of player.dodgeCD, fixing the
+   *   live issue where dodge lasts 0.42s but attacks unlock only at dodgeT<=0, by
+   *   which time dodgeCD (0.8->0) is often already <0.30 so the old heuristic
+   *   missed the SCATTO window. The old dodgeCD>0.30 check is kept as fallback.
+   */
+  private dashArmedUntilMs = 0;
 
   constructor(private audio: AudioEngine, private fx: CombatFx) {}
+
+  /**
+   * Arm the dash latch: call when central cancels dodge into attack.
+   * Wall-clock, O(1), no per-frame cost — expiry is lazy in isDashAttack()
+   * plus eager clear in tick()/decayWall().
+   */
+  noteDodgeCancel(): void {
+    const now = nowMs();
+    this.dashArmedUntilMs = now + COMBAT_TUNING.dashLatchWindow * 1000;
+    this.lastWallMs = now;
+  }
+
+  /** True while the dash latch is still within its 0.6s wall-clock window. */
+  private isDashLatched(): boolean {
+    if (this.dashArmedUntilMs <= 0) return false;
+    return nowMs() <= this.dashArmedUntilMs;
+  }
 
   /** Deterministic timer decay; central wiring may call each frame (additive API). */
   tick(dt: number): void {
     if (dt <= 0) return;
     if (this.parryFlashT > 0) this.parryFlashT = Math.max(0, this.parryFlashT - dt);
     if (this.specialCD > 0) this.specialCD = Math.max(0, this.specialCD - dt);
+    // eager latch expiry (wall clock; cheap compare, no alloc)
+    if (this.dashArmedUntilMs !== 0 && nowMs() > this.dashArmedUntilMs) this.dashArmedUntilMs = 0;
     this.lastWallMs = nowMs();
   }
 
@@ -116,10 +217,14 @@ export class CombatSystem {
     if (this.lastWallMs === 0) { this.lastWallMs = now; return; }
     let dt = (now - this.lastWallMs) / 1000;
     this.lastWallMs = now;
-    if (dt <= 0) return;
+    if (dt <= 0) {
+      if (this.dashArmedUntilMs !== 0 && now > this.dashArmedUntilMs) this.dashArmedUntilMs = 0;
+      return;
+    }
     if (dt > 0.25) dt = 0.25; // tab-switch clamp: no huge jumps
     if (this.parryFlashT > 0) this.parryFlashT = Math.max(0, this.parryFlashT - dt);
     if (this.specialCD > 0) this.specialCD = Math.max(0, this.specialCD - dt);
+    if (this.dashArmedUntilMs !== 0 && now > this.dashArmedUntilMs) this.dashArmedUntilMs = 0;
   }
 
   /** Remaining special cooldown (live value combining field + wall clock). */
@@ -139,14 +244,20 @@ export class CombatSystem {
   }
 
   /**
-   * Dash-attack detection (obj 11): dodge-cancel into attack within 0.5s.
+   * Dash-attack detection (obj 11 + latch fix):
+   * latched (noteDodgeCancel() within 0.6s) OR legacy heuristic
    * player.dodgeCD counts down from 0.8 (see player.ts dodge entry), so
    * dodgeCD > 0.30  <=>  dodge started less than 0.5s ago. Attacks are only
-   * allowed once dodgeT <= 0, hence attackT > 0 + dodgeCD > 0.30 isolates the
-   * cancel window without touching player.ts.
+   * allowed once dodgeT <= 0 (or <0.2 late-dodge path), hence attackT > 0 +
+   * dodgeCD > 0.30 used to isolate the cancel window without touching
+   * player.ts. LIVE ISSUE: by attack time dodgeCD is often already <0.30, so
+   * SCATTO never fired. The latch (armed by central via noteDodgeCancel())
+   * is now the primary signal; the dodgeCD check stays as fallback.
    */
   isDashAttack(player: Player): boolean {
-    return player.attackT > 0 && player.dodgeCD > 0.3;
+    if (player.attackT <= 0) return false;
+    if (this.isDashLatched()) return true;
+    return player.dodgeCD > 0.3;
   }
 
   private syncPerfect(player: Player): void {
@@ -158,8 +269,15 @@ export class CombatSystem {
     }
   }
 
-  /** player attack hit resolution — called each frame while attacking */
-  updatePlayerAttack(player: Player, enemies: Enemy[], cam: { addShake(v: number): void }): { kills: number; hits: number } {
+  /**
+   * player attack hit resolution — called each frame while attacking.
+   * @param ctx optional takedown context (backward compat: omit entirely).
+   *   Central passes `{ airborne: !player.grounded }` for drop/TETTO kills
+   *   (-> 'AEREO' label on kill) and `{ crouch: player.crouch }` for cover
+   *   kills (-> 'COPERTURA' + 1.1x dmg on kill). Finisher priority stays:
+   *   'FINISHER' still outranks 'AEREO'/'COPERTURA'.
+   */
+  updatePlayerAttack(player: Player, enemies: Enemy[], cam: { addShake(v: number): void }, ctx?: AttackContext): { kills: number; hits: number } {
     let kills = 0; let hits = 0;
     this.decayWall();
     this.syncPerfect(player);
@@ -187,7 +305,9 @@ export class CombatSystem {
     const base = dash ? CFG.combat.heavyDmg : heavy ? CFG.combat.heavyDmg : CFG.combat.lightDmg;
     const comboMul = player.combo === 2 ? 1.35 : 1;
     const ripMul = perfect ? 2.0 : riposte ? 1.5 : 1;
-    const dmg = Math.round(base * player.dmgMul * comboMul * ripMul);
+    // COPERTURA cover kill: small 1.1x bonus while crouched (multiplicative, rounded once)
+    const crouchMul = ctx?.crouch === true ? COMBAT_TUNING.crouchDmgMul : 1;
+    const dmg = Math.round(base * player.dmgMul * comboMul * ripMul * crouchMul);
     const range = CFG.combat.attackRange + (dash ? 1.0 : heavy ? 0.4 : 0);
     for (const e of enemies) {
       if (e.dead) continue;
@@ -217,7 +337,13 @@ export class CombatSystem {
       }
       this.debugLastResolution.dealt = true;
       this.fx.slash(e.pos);
-      const label = finisher ? 'FINISHER' : perfect ? 'PERFETTA' : riposte ? 'RIPOSTE' : dash ? 'SCATTO' : heavy ? 'PESANTE' : 'colpo';
+      // Takedown labels: TETTO (roof/drop, airborne) renders as 'AEREO' on kill;
+      // COPERTURA (crouch cover) renders as 'COPERTURA' on kill.
+      // Finisher priority stays: 'FINISHER' still outranks both.
+      const airborneKill = killed && ctx?.airborne === true;
+      const coverKill = killed && !airborneKill && ctx?.crouch === true;
+      const label = finisher ? 'FINISHER' : airborneKill ? 'AEREO' : coverKill ? 'COPERTURA' : perfect ? 'PERFETTA' : riposte ? 'RIPOSTE' : dash ? 'SCATTO' : heavy ? 'PESANTE' : 'colpo';
+      this.lastLabel = label;
       this.fx.damageNum(e.pos, dealt, label);
       cam.addShake(dash || heavy ? 0.35 : 0.18);
       hits++;

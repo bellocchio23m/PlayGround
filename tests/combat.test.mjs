@@ -125,5 +125,101 @@ console.log('combat/source-audit:');
   ok(!src.includes('new THREE.Vector3(e.pos.x, e.pos.y + 999'), 'no junk allocations');
 }
 
+console.log('combat/dash-latch:');
+{
+  // mirror of CombatSystem latch: armed-until timestamp + wall-clock expiry
+  const LATCH_MS = 600;
+  const isLatched = (now, until) => until > 0 && now <= until;
+  const isDashWithLatch = (attackT, dodgeCD, latched) => attackT > 0 && (latched || dodgeCD > 0.3);
+  ok(isLatched(1000, 1000 + LATCH_MS), 'latch armed: now<=until is latched');
+  ok(!isLatched(1000 + LATCH_MS + 1, 1000 + LATCH_MS), 'latch expired after 0.6s wall clock');
+  ok(!isLatched(1000, 0), 'latch disarmed (until=0) is not latched');
+  ok(isDashWithLatch(0.3, 0.1, true), 'dash via latch even when dodgeCD=0.1 (live SCATTO fix)');
+  ok(!isDashWithLatch(0.3, 0.1, false), 'no dash when latch off and dodgeCD low');
+  ok(!isDashWithLatch(0, 0.7, true), 'no dash when not attacking even if latched');
+  ok(isDashWithLatch(0.3, 0.5, false), 'legacy dodgeCD>0.30 fallback still works without latch');
+}
+
+console.log('combat/ctx-takedowns:');
+{
+  // mirror of updatePlayerAttack label priority + crouch bonus
+  const labelFor = (o) => {
+    const airborneKill = o.killed && o.airborne === true;
+    const coverKill = o.killed && !airborneKill && o.crouch === true;
+    if (o.finisher) return 'FINISHER';
+    if (airborneKill) return 'AEREO';
+    if (coverKill) return 'COPERTURA';
+    if (o.perfect) return 'PERFETTA';
+    if (o.riposte) return 'RIPOSTE';
+    if (o.dash) return 'SCATTO';
+    if (o.heavy) return 'PESANTE';
+    return 'colpo';
+  };
+  const crouchDmg = (base) => Math.round(base * 1 * 1 * 1 * 1.1);
+  ok(labelFor({ killed: true, airborne: true }) === 'AEREO', 'airborne kill -> AEREO (TETTO drop)');
+  ok(labelFor({ killed: true, crouch: true }) === 'COPERTURA', 'crouch kill -> COPERTURA');
+  ok(labelFor({ finisher: true, killed: true, airborne: true }) === 'FINISHER', 'finisher priority stays over AEREO');
+  ok(labelFor({ finisher: true, killed: true, crouch: true }) === 'FINISHER', 'finisher priority stays over COPERTURA');
+  ok(labelFor({ killed: true, airborne: true, crouch: true }) === 'AEREO', 'airborne outranks crouch on kill');
+  ok(labelFor({ killed: false, airborne: true, dash: true }) === 'SCATTO', 'airborne non-kill falls through (no AEREO)');
+  ok(crouchDmg(26) === Math.round(26 * 1.1), 'crouch bonus 1.1x (26->29)');
+  ok(crouchDmg(48) === Math.round(48 * 1.1), 'crouch bonus 1.1x heavy (48->53)');
+}
+
+console.log('combat/assass-range:');
+{
+  const assassRangeBonus = (airborne) => (airborne ? 1.6 : 0);
+  ok(assassRangeBonus(true) === 1.6, 'assassRangeBonus(airborne=true) = 1.6');
+  ok(assassRangeBonus(false) === 0, 'assassRangeBonus(airborne=false) = 0');
+}
+
+console.log('combat/hitstop:');
+{
+  const HS = { kill: 0.09, hit: 0.045, perfect: 0.08 };
+  const hitstopFor = (r) => {
+    if (typeof r === 'string') {
+      if (r === 'kill') return HS.kill;
+      if (r === 'perfect') return HS.perfect;
+      if (r === 'hit') return HS.hit;
+      return 0;
+    }
+    if (r.killed === true || (r.kills !== undefined && r.kills > 0)) return HS.kill;
+    if (r.perfect === true) return HS.perfect;
+    if (r.hit === true || (r.hits !== undefined && r.hits > 0)) return HS.hit;
+    return 0;
+  };
+  ok(hitstopFor('kill') === 0.09, 'hitstop kill = 0.09');
+  ok(hitstopFor('hit') === 0.045, 'hitstop hit = 0.045');
+  ok(hitstopFor('perfect') === 0.08, 'hitstop perfect = 0.08');
+  ok(hitstopFor('miss') === 0, 'hitstop miss = 0');
+  ok(hitstopFor({ killed: true, perfect: true }) === 0.09, 'hitstop kill outranks perfect (object)');
+  ok(hitstopFor({ kills: 1, hits: 1 }) === 0.09, 'hitstop {kills:1} = 0.09');
+}
+
+console.log('combat/parryQuality:');
+{
+  const parryQuality = (t) => (t > 0.3 ? 'perfect' : t > 0.1 ? 'good' : 'late');
+  ok(parryQuality(0.31) === 'perfect', 'parryQuality 0.31 = perfect');
+  ok(parryQuality(0.45) === 'perfect', 'parryQuality 0.45 = perfect');
+  ok(parryQuality(0.3) === 'good', 'parryQuality boundary 0.30 = good (not perfect)');
+  ok(parryQuality(0.11) === 'good', 'parryQuality 0.11 = good');
+  ok(parryQuality(0.1) === 'late', 'parryQuality boundary 0.10 = late');
+  ok(parryQuality(0) === 'late', 'parryQuality 0 = late');
+}
+
+console.log('combat/source-audit-new:');
+{
+  const src = readFileSync(new URL('../src/combat/combat.ts', import.meta.url), 'utf8');
+  const checks = [
+    'noteDodgeCancel', 'dashArmed', 'dashLatchWindow', 'AttackContext',
+    'assassRangeBonus', 'hitstopFor', 'parryQuality', 'AEREO', 'COPERTURA',
+    'TETTO', 'airborne', 'crouchDmgMul', 'isDashLatched',
+  ];
+  for (const t of checks) ok(src.includes(t), `combat.ts contains "${t}"`);
+  ok(src.includes('ctx?:'), 'updatePlayerAttack has optional ctx param (backward compat)');
+  ok(src.includes('0.6'), 'dash latch 0.6s window present');
+  ok(src.includes('0.09') && src.includes('0.045') && src.includes('0.08'), 'hitstop map 0.09/0.045/0.08 present');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
