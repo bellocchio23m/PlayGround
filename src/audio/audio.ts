@@ -63,15 +63,18 @@ export class AudioEngine {
     src.start(t);
   }
 
-  footstep(run: boolean, surface: 'stone' | 'metal' | 'wood' = 'stone'): void {
+  footstep(run: boolean, surface: 'stone' | 'metal' | 'wood' | 'roof' = 'stone'): void {
     const cfg = {
       stone: { cut: run ? 900 : 600, peak: run ? 0.25 : 0.14 },
       metal: { cut: run ? 2400 : 1800, peak: run ? 0.2 : 0.11 },
       wood: { cut: run ? 500 : 380, peak: run ? 0.28 : 0.16 },
+      roof: { cut: run ? 700 : 480, peak: run ? 0.26 : 0.15 },
     }[surface];
     this.noise(run ? 0.09 : 0.06, cfg.peak, cfg.cut);
     if (surface === 'metal') this.osc('triangle', 1900, 1400, 0.07, 0.06);
     if (surface === 'wood') this.osc('sine', 180, 90, 0.09, 0.12);
+    // 'roof': hollow sheet-metal resonance under the filtered step noise.
+    if (surface === 'roof') this.osc('sine', 140, 70, 0.14, 0.14);
   }
   jump(): void { this.noise(0.12, 0.15, 700); }
   land(hard: boolean): void { this.noise(hard ? 0.22 : 0.12, hard ? 0.4 : 0.2, hard ? 500 : 700); this.osc('sine', 120, 45, 0.18, hard ? 0.3 : 0.15); }
@@ -103,6 +106,23 @@ export class AudioEngine {
   pickup(): void { this.osc('sine', 660, 990, 0.12, 0.2); }
   ui(): void { this.osc('sine', 880, 880, 0.06, 0.12); }
   vault(): void { this.noise(0.1, 0.16, 1000); }
+  /** Sprint burst: airy band-pass whoosh. One-shot, reuses osc/noise helpers (no leaks). */
+  sprintWhoosh(): void { this.noise(0.18, 0.22, 2800, 'bandpass'); }
+  /** Dodge roll: soft low thud + cloth noise. One-shot, no interval/timer. */
+  roll(): void { this.noise(0.16, 0.2, 600); this.osc('sine', 160, 70, 0.16, 0.18); }
+  /** Smoke deploy: filtered white-noise hiss. One-shot, no persistent nodes. */
+  smokeHiss(): void { this.noise(0.45, 0.18, 4500, 'highpass'); }
+  /** Lure coin clack: two short metallic pings. One-shot oscs only. */
+  lureClack(): void { this.osc('triangle', 2400, 2000, 0.06, 0.2); this.osc('triangle', 3100, 2600, 0.08, 0.14); }
+  /** Enemy pain grunt per archetype (central calls on takeDamage). Pitch variants only. */
+  pain(kind: 'guard' | 'elite' | 'brute' | 'ranger'): void {
+    switch (kind) {
+      case 'guard': this.osc('sawtooth', 260, 120, 0.16, 0.22); break;
+      case 'elite': this.osc('sawtooth', 330, 150, 0.16, 0.22); break;
+      case 'brute': this.osc('sawtooth', 170, 70, 0.24, 0.3); break;
+      case 'ranger': this.osc('sawtooth', 420, 200, 0.13, 0.2); break;
+    }
+  }
 
   /** Dark ambient loop: bass pulse + hats. Tempo/character follow game mood. */
   startMusic(): void {

@@ -28,6 +28,14 @@ export const ADAPT_LOW_HOLD_S = 4;
 export const ADAPT_HIGH_HOLD_S = 10;
 export const ADAPT_COOLDOWN_S = 4;
 
+/** Pixel ratio for an adaptive level (0=low 0.75, 1=med 1.0, 2=high 1.5).
+ *  Central calls this on level transitions instead of hardcoding ratios.
+ *  Out-of-range levels clamp to [0, 2]. Pure, no allocations. */
+export function pixelRatioFor(level: number): number {
+  const i = Math.min(ADAPT_RATIOS.length - 1, Math.max(0, Math.floor(level)));
+  return ADAPT_RATIOS[i] ?? 1.0;
+}
+
 export class AdaptiveQuality {
   /** 0 = low, 1 = med, 2 = high. */
   level = 1;

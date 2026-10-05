@@ -83,7 +83,7 @@ ok(/autoLayout\(\):\s*LayoutPreset/.test(uiSrc) && /innerHeight\s*<\s*500/.test(
 console.log('audio (source audit):');
 ok(/bark\(kind:\s*'alert'\s*\|\s*'suspicious'\s*\|\s*'attack'\s*\|\s*'down'\)/.test(audioSrc), 'bark(kind) with 4 kinds');
 ok(/sting\(state:\s*'suspicious'\s*\|\s*'investigating'\s*\|\s*'combat'\s*\|\s*'lost'\)/.test(audioSrc), 'sting(state) with 4 states');
-ok(/footstep\(run:\s*boolean,\s*surface:\s*'stone'\s*\|\s*'metal'\s*\|\s*'wood'\s*=\s*'stone'\)/.test(audioSrc), 'footstep(run, surface?) surface variation, stone default');
+ok(/footstep\(run:\s*boolean,\s*surface:\s*'stone'\s*\|\s*'metal'\s*\|\s*'wood'(\s*\|\s*'roof')?\s*=\s*'stone'\)/.test(audioSrc), 'footstep(run, surface?) surface variation, stone default');
 ok(/this\.audio\.footstep\(run\)/.test(readFileSync(new URL('../src/player/player.ts', import.meta.url), 'utf8')), 'old footstep(run) call-site still compiles');
 ok(/startAmbience\(\):\s*void/.test(audioSrc) && /stopAmbience\(\):\s*void/.test(audioSrc), 'startAmbience/stopAmbience exist');
 ok(/ambienceTimer\s*!==\s*null/.test(audioSrc), 'ambience start idempotent (single guarded interval)');

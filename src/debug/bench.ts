@@ -75,7 +75,10 @@ export const SCENARIOS: BenchScenario[] = [
 /** Manual checklist — boot/offline cannot be measured in-page. No fake numbers. */
 export const BENCH_MANUAL_CHECKLIST =
   'MANUAL (do not fake numbers): [ ] cold boot to menu <= 3s on target device; ' +
-  '[ ] airplane-mode reload playable offline (sw.js cached); [ ] F4 in-page runs attached for A-J + zone.';
+  '[ ] airplane-mode reload playable offline (sw.js cached); [ ] F4 in-page runs attached for A-J + zone; ' +
+  '[ ] save persists across reload (slot round-trip); ' +
+  '[ ] pause/resume stable (no stuck input, audio resumes); ' +
+  '[ ] zone reload stable (3x reload without error).';
 
 /** Map extended bot modes onto the legacy central union. duel/smoke fight like combat. */
 export function baseBot(b: BenchBotMode | string): 'off' | 'circle' | 'combat' | 'traverse' {

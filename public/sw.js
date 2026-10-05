@@ -14,6 +14,10 @@
  *   strategy itself changes (avoids churning every user install).
  * Precache coverage: scrape regex below catches src/href incl. .js/.css/fonts;
  * manifest icons (incl. .png like icon-512.png) are cached best-effort too. */
+// NOTE: a ServiceWorker cannot export to the page. VERSION below is a
+// doc-only mirror of CACHE for audits/grep (page detects updates via
+// 'controllerchange', never by importing this file). Keep both in sync.
+const VERSION = 'v3';
 const CACHE = 'shadowline-v3';
 const CORE = ['./index.html', './manifest.webmanifest', './icon.svg'];
 // Best-effort extras: referenced by manifest but may not exist in every build.

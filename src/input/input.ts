@@ -44,6 +44,10 @@ export class InputManager {
     window.addEventListener('blur', () => this.keys.clear());
 
     // touch joystick (left half) + camera drag (right half)
+    // MULTITOUCH: joy-zone and cam-zone track independent touch identifiers
+    // (joyId vs camId), so a joystick finger + a camera finger coexist.
+    // Buttons use discrete tap/setHold paths (re-entrant); releaseAll() resets
+    // both zones on pause/death.
     const joyZone = root.querySelector<HTMLElement>('#joy-zone');
     const camZone = root.querySelector<HTMLElement>('#cam-zone');
     const knob = root.querySelector<HTMLElement>('#joy-knob');
@@ -139,13 +143,36 @@ export class InputManager {
   }
 
   tap(action: InputAction): void {
+    // Re-entrant + idempotent: repeated taps just re-assert the edge flag;
+    // central consumes via pressed[] + lateClear() each frame. Safe to call
+    // from keyboard/gamepad/touch/multitouch paths concurrently.
     this.pressed[action] = true; this.state[action] = true;
   }
 
-  /** called by touch buttons */
+  /** called by touch buttons.
+   *  Re-entrant: toggling crouch twice returns to the prior state; calling
+   *  with the same (action, v) twice is a no-op beyond re-assertion. */
   setHold(action: 'sprint' | 'crouch', v: boolean): void {
     if (action === 'sprint') this.state.sprint = v;
     if (action === 'crouch') { if (v) { this.crouchOn = !this.crouchOn; this.pressed.crouchToggle = true; } this.state.crouch = this.crouchOn; }
+  }
+
+  /** Clear all held movement/camera state (central calls on pause/death/menu).
+   *  Idempotent: safe to call repeatedly; no behavior change to tap/edge paths. */
+  releaseAll(): void {
+    this.crouchOn = false;
+    this.state.sprint = false;
+    this.state.crouch = false;
+    this.state.crouchToggle = false;
+    this.state.moveX = 0; this.state.moveY = 0;
+    this.state.camDX = 0; this.state.camDY = 0;
+    this.joyActive = false; this.joyId = -1;
+    this.joyDX = 0; this.joyDY = 0;
+    this.camId = -1; this.camLX = 0; this.camLY = 0;
+    this.keys.clear();
+    const p = this.pressed;
+    (p as { sprint: boolean }).sprint = false;
+    (p as { crouch: boolean }).crouch = false;
   }
 
   /** poll keyboard axes + gamepad, merge with touch joystick. Must be called once per frame. */
