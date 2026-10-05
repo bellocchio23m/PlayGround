@@ -75,6 +75,7 @@ export class Player {
   traverseDir = new THREE.Vector3(0, 0, -1);
   private _travProbe = new THREE.Vector3();
   coyote = 0; jumpBuf = 0;
+  attackBuf = 0; attackBufHeavy = false;
   stepT = 0; noiseT = 0;
   airTime = 0;
   moving = 0;
@@ -155,11 +156,15 @@ export class Player {
     this.parryT = Math.max(0, this.parryT - dt);
     this.riposteT = Math.max(0, this.riposteT - dt);
 
-    // attack input (buffered; dodge-cancel into dash attack in late dodge)
-    if ((input.pressed.attack || input.pressed.heavy) && this.attackT <= 0 && (this.dodgeT <= 0 || this.dodgeT < 0.2) && this.vaultT <= 0 && this.climbT <= 0 && this.mantleT <= 0 && !this.hanging) {
+    // attack input (buffered 0.3s; dodge-cancel into dash attack in late dodge)
+    if (input.pressed.attack || input.pressed.heavy) {
+      this.attackBuf = 0.3;
+      this.attackBufHeavy = input.pressed.heavy;
+    } else this.attackBuf -= dt;
+    if (this.attackBuf > 0 && this.attackT <= 0 && (this.dodgeT <= 0 || this.dodgeT < 0.25) && this.vaultT <= 0 && this.climbT <= 0 && this.mantleT <= 0 && !this.hanging) {
       if (this.dodgeT > 0) this.dodgeT = 0; // cancel dodge -> dash attack
-      this.attackKind = input.pressed.heavy ? 'heavy' : 'light';
-      this.attackKind = input.pressed.heavy ? 'heavy' : 'light';
+      this.attackBuf = 0;
+      this.attackKind = this.attackBufHeavy ? 'heavy' : 'light';
       this.attackT = this.attackKind === 'heavy' ? 0.62 : 0.42;
       if (this.comboWindow > 0) this.combo = Math.min(2, this.combo + 1); else this.combo = 0;
       this.comboWindow = 0;

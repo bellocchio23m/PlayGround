@@ -15,6 +15,7 @@ import { Enemy, EnemyKind } from '../ai/enemy';
 import { Civilian, civilianSpots, SAFE_ZONES } from '../ai/civilian';
 import { AdaptiveQuality } from '../debug/adaptive';
 import { CombatSystem } from '../combat/combat';
+import { hitstopFor } from '../combat/combat';
 import { canAssassinate } from '../stealth/perception';
 import { AudioEngine } from '../audio/audio';
 import { SaveSystem } from '../save/save';
@@ -166,6 +167,8 @@ export class Game {
     this.xp.level = lvl;
     this.smoke = d.inventory.smoke; this.knives = d.inventory.knives;
     this.audio.setVolume(d.settings.volume);
+    this.audio.muted = d.settings.muted ?? false;
+    this.audio.applyMute();
   }
 
   /** central noise bus: generators mask player noise within 9m (distraction/cover play) */
@@ -487,6 +490,8 @@ export class Game {
       this.ui.toast('FALCE LUNARE appresa! (R / FALCE)', 3500);
     }
     if (rt.ghost) this.save.bumpStat('ghosts');
+    // mission replay: mark skippable once completed
+    (rt.def as unknown as { skipUnlocked?: boolean }).skipUnlocked = true;
     this.save.saveMissionComplete(rt.def.id, rt.ghost, rt.def.rewardXp + ghostBonus);
     this.screen = 'complete';
     this.ui.showHud(false);
@@ -625,6 +630,8 @@ export class Game {
   private markE: THREE.Texture | null = null;
   private hiddenT = 0;
   hidden = false;
+  private hideSpotUntil = -99;
+  private dbgT = 0;
 
   private makeMarker(symbol: string, color: string): THREE.Texture {
     const c = document.createElement('canvas'); c.width = 64; c.height = 64;
@@ -678,6 +685,21 @@ export class Game {
     if (this.hiddenT < 0.5) return;
     this.hiddenT = 0;
     const p = this.player;
+    // hiding spot: concealed while crouched inside (timer refreshed on use)
+    if (this.time < this.hideSpotUntil) {
+      const still = p.crouch && p.moving < 1.2 && !p.dead;
+      if (!still) this.hideSpotUntil = -99;
+      else {
+        let seenClose = false;
+        for (const e of this.enemies) {
+          if (e.dead) continue;
+          if (Math.hypot(e.pos.x - p.pos.x, e.pos.z - p.pos.z) < 3) { seenClose = true; break; }
+        }
+        this.hidden = !seenClose;
+        this.ui.setHidden(this.hidden && this.screen === 'playing');
+        return;
+      }
+    }
     let h = p.crouch && p.moving < 0.6 && !p.dead;
     if (h) {
       for (const e of this.enemies) {
@@ -830,21 +852,45 @@ export class Game {
 
   private combatFxKill(_t: Enemy): void { this.cam.addShake(0.3); }
 
+  /** objective advance with smart checkpoint (world data) + checkpoint persist */
+  private advance(): boolean {
+    return this.advanceRt(this.mission);
+  }
+
+  private advanceRt(rt: MissionRuntime): boolean {
+    const done = advanceObjective(rt);
+    const cps = (this.world as unknown as { checkpoints?: Array<{ missionId: string; pos: THREE.Vector3 }> }).checkpoints ?? [];
+    const cp = cps.find((c) => c.missionId === rt.def.id);
+    if (cp && !done) {
+      this.save.data.checkpoint = { x: cp.pos.x, y: cp.pos.y, z: cp.pos.z, missionId: rt.def.id };
+      this.save.save();
+    }
+    return done;
+  }
+
   private checkAssassinateObjective(): void {
     const o = currentObjective(this.mission);
     if (o?.kind === 'assassinate') {
       const need = o.count ?? 1;
-      if (this.mission.progress >= need && advanceObjective(this.mission)) this.completeMission();
+      if (this.mission.progress >= need && this.advance()) this.completeMission();
       else this.ui.toast('Obiettivo completato — sparisci!');
     }
   }
 
-  private nearestInteract(): { id: string; label: string; d: number } | null {
-    let best: { id: string; label: string; d: number } | null = null;
+  private nearestInteract(): { id: string; label: string; d: number; kind: string } | null {
+    let best: { id: string; label: string; d: number; kind: string } | null = null;
     for (const it of this.world.interactables) {
       if (it.taken) continue;
       const d = Math.hypot(it.pos.x - this.player.pos.x, it.pos.z - this.player.pos.z);
-      if (d < it.radius && (!best || d < best.d)) best = { id: it.id, label: it.label, d };
+      if (d < it.radius && (!best || d < best.d)) best = { id: it.id, label: it.label, d, kind: it.kind };
+    }
+    // hide corpse: nearest unhidden dead enemy within 2m (not an interactable, but contextual)
+    if (!best) {
+      for (const e of this.enemies) {
+        if (!e.dead || (e as unknown as { hidden?: boolean }).hidden) continue;
+        const d = Math.hypot(e.pos.x - this.player.pos.x, e.pos.z - this.player.pos.z);
+        if (d < 2.2) { best = { id: `corpse-${e.id}`, label: 'Nascondi il corpo', d, kind: 'corpse' }; break; }
+      }
     }
     return best;
   }
@@ -852,6 +898,68 @@ export class Game {
   private tryInteract(): void {
     const it = this.nearestInteract();
     if (!it) return;
+    // corpse hiding (contextual, not an interactable)
+    if (it.kind === 'corpse') {
+      const eid = parseInt(it.id.slice(7), 10);
+      const e = this.enemies.find((x) => x.id === eid);
+      if (e && e.dead) {
+        (e as unknown as { hideCorpse?: () => void }).hideCorpse?.();
+        e.rig.group.position.y -= 0.55; // sunk into cover/shadow
+        this.audio.pickup();
+        this.ui.killfeed('Corpo nascosto');
+        this.ui.toast('Corpo nascosto — nessuno lo troverà');
+      }
+      return;
+    }
+    // doors: remove the blocking slab so the path opens
+    if (it.kind === 'door') {
+      const w = this.world.interactables.find((i) => i.id === it.id)!;
+      w.taken = true;
+      if (w.mesh) w.mesh.visible = false;
+      const slabs = (this.world as unknown as { doorSlabs?: Array<{ id: string; min: THREE.Vector3; max: THREE.Vector3 }> }).doorSlabs ?? [];
+      const slab = slabs.find((s) => s.id === it.id);
+      if (slab) {
+        // epsilon match: collider bounds come from float arithmetic (x-w/2), slabs are literals
+        const eq = (a: number, b: number): boolean => Math.abs(a - b) < 1e-6;
+        const before = this.world.colliders.length;
+        this.world.colliders = this.world.colliders.filter((c) =>
+          !(eq(c.min.x, slab.min.x) && eq(c.min.z, slab.min.z) && eq(c.max.x, slab.max.x) && eq(c.max.z, slab.max.z)));
+        if (this.world.colliders.length < before) this.ui.toast('Passaggio aperto');
+        else this.ui.toast('Porta aperta');
+      }
+      this.audio.pickup();
+      this.save.save();
+      return;
+    }
+    // vents: crawl to the other end
+    if (it.kind === 'vent') {
+      const vents = (this.world as unknown as { vents?: Array<{ id: string; a: THREE.Vector3; b: THREE.Vector3 }> }).vents ?? [];
+      for (const v of vents) {
+        const atA = Math.hypot(v.a.x - this.player.pos.x, v.a.z - this.player.pos.z) < 3;
+        const atB = Math.hypot(v.b.x - this.player.pos.x, v.b.z - this.player.pos.z) < 3;
+        if (atA || atB) {
+          const dst = atA ? v.b : v.a;
+          this.player.pos.set(dst.x, this.world.groundHeight(dst.x, dst.z), dst.z);
+          this.player.vel.set(0, 0, 0);
+          this.burst(this.player.pos, 0x8fa3c1, 8);
+          this.audio.vault();
+          this.ui.toast('Condotto attraversato');
+          break;
+        }
+      }
+      return;
+    }
+    // hiding spots: crouch inside → concealed while you stay
+    if (it.kind === 'hide') {
+      if (this.player.crouch) {
+        this.hideSpotUntil = this.time + 10;
+        this.ui.toast('Nascosto — resta fermo e accovacciato');
+        this.audio.ui();
+      } else {
+        this.ui.toast('Accovacciati per nasconderti qui');
+      }
+      return;
+    }
     const w = this.world.interactables.find((i) => i.id === it.id)!;
     w.taken = true;
     if (w.mesh) w.mesh.visible = false;
@@ -892,7 +1000,7 @@ export class Game {
     if (o?.kind === 'collect') {
       const want = (o.target as string) ?? '';
       if (want === it.id || (want === 'documento' && it.id === 'doc') || o.target === undefined) {
-        if (advanceObjective(this.mission)) this.completeMission();
+        if (this.advance()) this.completeMission();
         else this.ui.toast('Oggetto recuperato — vai al prossimo obiettivo');
       }
     }
@@ -1007,8 +1115,10 @@ export class Game {
     this.cam.mode = anyCombat ? 'combat' : this.player.crouch ? 'stealth' : 'explore';
     this.audio.setMood(anyCombat ? 'combat' : this.mission.spotted ? 'search' : this.player.sprinting ? 'escape' : 'stealth');
 
-    // player
+    // player (dash latch: detect dodge-cancel into attack for SCATTO)
+    const wasDodging = this.player.dodgeT > 0;
     this.player.update(dt, inp, this.world, this.cam.yaw);
+    if (wasDodging && this.player.dodgeT <= 0 && this.player.attackT > 0) this.combat.noteDodgeCancel();
     this.cam.update(dt, inp.state, this.player.pos, this.world, this.player.crouch, this.player.sprinting);
 
     // fixed-Hz brain ticks per enemy (profile-driven) + AI cost measurement
@@ -1021,11 +1131,12 @@ export class Game {
       e.acc = Math.min(e.acc - this.aiInterval, this.aiInterval * 2); // no spiral of death
       e.tick(this.aiInterval, now, prefs, this.world, this.audio,
         (en) => this.onSpotted(en),
-        () => { this.ui.toast('…ti hanno perso di vista. Nasconditi!'); this.audio.sting('lost'); });
-      // corpse discovery (guards investigate; civilians scream)
+        () => { this.ui.toast('…ti hanno perso di vista. Nasconditi!'); this.audio.sting('lost'); },
+        this.enemies);
+      // corpse discovery (hidden corpses skipped; civilians scream)
       for (const c of this.enemies) {
-        if (c.dead) {
-          e.seeCorpse(c.pos.x, c.pos.z);
+        if (c.dead && !(c as unknown as { hidden?: boolean }).hidden) {
+          e.seeCorpse(c.pos.x, c.pos.z, false);
           for (const civ of this.civilians) civ.seeCorpse(c.pos.x, c.pos.z);
         }
       }
@@ -1049,16 +1160,25 @@ export class Game {
 
     // combat
     this.combat.tick(dt);
-    const res = this.combat.updatePlayerAttack(this.player, this.enemies, this.cam);
+    const prevParryFlash = this.combat.parryFlashT;
+    const res = this.combat.updatePlayerAttack(this.player, this.enemies, this.cam,
+      { airborne: !this.player.grounded, crouch: this.player.crouch });
     if (res.hits > 0) {
-      this.hitstop = Math.max(this.hitstop, res.kills > 0 ? 0.09 : 0.045);
-      this.noises.push({ x: this.player.pos.x, y: this.player.pos.y, z: this.player.pos.z, radius: 20, loudness: 1.2, kind: 'fight', t: now });
+      const lbl = this.combat.lastLabel;
+      this.hitstop = Math.max(this.hitstop, hitstopFor(res.kills > 0 ? 'kill' : 'hit'));
+      this.pushNoise({ x: this.player.pos.x, y: this.player.pos.y, z: this.player.pos.z, radius: 20, loudness: 1.2, kind: 'fight', t: now });
       for (const c of this.civilians) c.scare(this.player.pos.x, this.player.pos.z, true);
+      if (lbl === 'AEREO' || lbl === 'COPERTURA' || lbl === 'FALCE LUNARE' || lbl === 'FINISHER') this.ui.banner(lbl, lbl === 'AEREO' ? 'takedown aereo' : lbl === 'COPERTURA' ? 'takedown da copertura' : '');
       if (res.kills > 0) { this.ui.killfeed(res.kills > 1 ? `⚔ ${res.kills} nemici abbattuti!` : '⚔ Nemico abbattuto'); this.mission.progress += res.kills; this.save.bumpStat('kills', res.kills); this.checkAssassinateObjective(); }
     }
     this.combat.updateEnemyAttacks(this.player, this.enemies, () => {
       this.ui.damageFlash(0.7); this.cam.addShake(0.3); this.vibrate(40);
     });
+    if (this.combat.parryFlashT > prevParryFlash) {
+      const perfect = this.combat.parryFlashT > 0.5;
+      this.ui.flashParry(perfect ? 'perfect' : 'good');
+      if (perfect) { this.ui.banner('PERFETTA', 'contrattacco!'); this.hitstop = Math.max(this.hitstop, hitstopFor('perfect')); }
+    }
 
     // assassination prompt + trigger
     this.assassPrompt = this.nearestAssassinTarget();
@@ -1120,7 +1240,22 @@ export class Game {
       this.ui.setTracker(this.mission.def.name, this.mission.def.objectives.map((x) => x.text), this.mission.objIndex, timer);
     }
     this.ui.updateVignette(dt, this.player.hp, this.player.hpMax);
+    this.ui.tickFx(dt);
+    // audio surfaces + wind (cheap setters, no allocs)
+    this.audio.setSurface(this.player.pos.y > 3 ? 'metal' : 'stone');
+    this.audio.whoosh(this.player.sprinting ? this.player.moving : 0);
     if (this.mapT >= 0.25 && this.minimapAllowed) { this.mapT = 0; this.drawMinimap(); }
+    // debug extra panel (2Hz, change-guarded inside UI)
+    this.dbgT += dt;
+    if (this.dbgT >= 0.5 && this.debug) {
+      this.dbgT = 0;
+      this.ui.setDebugExtra([
+        `vel ${this.player.moving.toFixed(1)} stam ${Math.round(this.player.stamina)} hp ${Math.round(this.player.hp)}`,
+        `profile ${this.profile.id} adapt ${this.adaptive.level}`,
+        `zone porto-scuro npcs ${this.enemies.filter((e) => !e.dead).length}+${this.civilians.length}`,
+        `save v${this.save.data.v} slot ${this.save.slotIndex + 1}`,
+      ]);
+    }
 
     this.bench?.update(dt);
     const bs = this.bench?.status();
@@ -1226,19 +1361,19 @@ export class Game {
       if (d < r && (o.target.y === 0 || dy < 4)) {
         // special: m3 roof needs height
         if (rt.def.id === 'm3-verticale' && o.id === 'climb-roof' && p.y < 7) { /* not yet */ }
-        else if (advanceObjective(rt)) this.completeMission();
+        else if (this.advanceRt(rt)) this.completeMission();
         else { this.ui.toast('Obiettivo completato!'); this.audio.pickup(); }
       }
     } else if (o.kind === 'survive') {
       const need = o.count ?? 45;
       rt.progress = rt.time;
       if (this.alarmT > 0) { this.alarmT -= dt; if (Math.floor(this.alarmT) % 10 === 0) this.alertAll(); }
-      if (rt.time >= need && advanceObjective(rt)) { /* next: escape */ this.ui.toast('Sei sopravvissuto — ora sparisci!'); }
+      if (rt.time >= need && this.advanceRt(rt)) { /* next: escape */ this.ui.toast('Sei sopravvissuto — ora sparisci!'); }
     } else if (o.kind === 'escape' && o.target instanceof THREE.Vector3) {
       const d = Math.hypot(o.target.x - p.x, o.target.z - p.z);
       const nearEnemy = this.enemies.some((e) => !e.dead && Math.hypot(e.pos.x - p.x, e.pos.z - p.z) < 12);
       if (d < (o.radius ?? 5) && (!anyCombat || !nearEnemy)) {
-        if (advanceObjective(rt)) this.completeMission();
+        if (this.advanceRt(rt)) this.completeMission();
       } else if (d < (o.radius ?? 5) && anyCombat) {
         this.ui.prompt('⚔ Semina i nemici prima di sparire!');
       }
