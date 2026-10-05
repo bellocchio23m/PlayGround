@@ -26,6 +26,20 @@ export interface MissionDef {
   narrative?: string;
   /** (phase-3, additive) Bonus XP central awards on completion when runtime `ghost` is still true. */
   ghostBonusXp?: number;
+  /** (additive) Mission replay: central treats `undefined` as TRUE (all missions replayable by
+   *  default). Set `replayable: false` only to one-shot a mission. Central shows completed
+   *  missions in a replay list and allows restarting them with rewards re-granted. */
+  replayable?: boolean;
+  /** (additive) Skip unlocked: set when the mission has been completed at least once.
+   *  Central persists this (save) and offers "skip" (auto-complete with base XP, no ghost bonus). */
+  skipUnlocked?: boolean;
+}
+
+export const DEFAULT_REPLAYABLE = true;
+
+/** helper: replayable defaults to true when the field is undefined (additive, no behavior change). */
+export function isReplayable(def: MissionDef): boolean {
+  return def.replayable ?? DEFAULT_REPLAYABLE;
 }
 
 export interface MissionRuntime {

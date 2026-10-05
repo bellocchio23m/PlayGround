@@ -32,6 +32,29 @@ export class World {
   /** PHASE-3: noisy generator props. CENTRAL CONTRACT: central masks/attenuates player-generated
    *  NoiseEvents whose source is within ~9m of any entry (sneaking near a generator is safer). */
   generators: THREE.Vector3[] = [];
+  /** DOORS (level-design, additive): 2 locked door props.
+   *  CENTRAL CONTRACT (game.ts tryInteract): each interactable with kind 'door' (ids below) resolves as:
+   *  on interact -> `taken=true`, rotate/hide its prop mesh (visible change: thin leaf rotates open),
+   *  then REMOVE the matching collider slab from `world.colliders` by matching `doorSlabs` entry
+   *  with the same `id` (delete the Box3 whose min/max equal the slab's min/max). Door stays open
+   *  for the rest of the run (persist via save if central wishes).
+   *  - 'door-warehouse': thin leaf blocking the warehouse front gap (x 0.4..3.6, z -34). Locked until used.
+   *  - 'door-villa': thin gate leaf in the villa forecourt fence (x -1.2..1.2, z -23). Locked until used. */
+  doorSlabs: Array<{ id: string; min: THREE.Vector3; max: THREE.Vector3 }> = [];
+  /** HIDING SPOTS (level-design, additive): 4 crouch-hiding props (2 dumpsters with lids, 2 tarp carts).
+   *  CENTRAL CONTRACT (game.ts): crouch + interact with a kind 'hide' interactable (ids hide-1..4)
+   *  within 2m -> central sets player hidden (breaks LOS / drops suspicion) while crouched at the spot.
+   *  You only need `hidingSpots` positions + the 'hide' interactables below for the prompt. */
+  hidingSpots: THREE.Vector3[] = [];
+  /** VENTS (level-design, additive): 2 crawl vents connecting alley<->courtyard.
+   *  CENTRAL CONTRACT (game.ts tryInteract): interact at EITHER end (kind 'vent' interactables
+   *  `vent-1-a/b`, `vent-2-a/b` below, radius 2.5) -> 1.2s fade, then teleport the player to the
+   *  opposite endpoint (`vents` entry `a` <-> `b`). One-way per use; usable both directions. */
+  vents: Array<{ id: string; a: THREE.Vector3; b: THREE.Vector3 }> = [];
+  /** SMART CHECKPOINTS (level-design, additive): 1 per mission, mid-objective, on ground (y=0),
+   *  never inside a collider. CENTRAL CONTRACT: on objective advance, central may respawn the
+   *  player at the checkpoint matching the mission id (instead of mission start). */
+  checkpoints: Array<{ missionId: string; pos: THREE.Vector3 }> = [];
   private ray = new THREE.Raycaster();
   /** PRODUCTION material library: flat-shaded, zero textures, 1 shader family.
    *  TEMPORARY placeholders (to replace with skinned/textured assets later):
@@ -66,6 +89,12 @@ export class World {
     this.breakersAndGenerators();
     this.extraPatrols();
     this.poisInit();
+    // ---- level-design additive pack (doors / hiding / vents / chase route / checkpoints) ----
+    this.doorsInit();
+    this.hidingInit();
+    this.ventsInit();
+    this.chaseRoute();
+    this.checkpointsInit();
     this.scene.add(this.group);
   }
 
@@ -694,6 +723,122 @@ export class World {
     P('poi-gen-plaza', 'Generatore Piazza', -9, 0.5, 25.5, 'Frastuono: copre i tuoi rumori se resti vicino.');
     P('poi-gen-alley', 'Generatore Canale', 35, 0.5, 22.5, 'Frastuono: copre i tuoi rumori se resti vicino.');
     P('poi-extract-sud', 'Estrazione Sud', 0, 0, 34, 'Punto di estrazione: semina i nemici prima di sparire.');
+  }
+
+  /** DOORS: 2 locked door props (thin leaves). See `doorSlabs` contract above. */
+  private doorsInit(): void {
+    const V = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, y, z);
+    // --- door-warehouse: thin leaf blocking the warehouse front gap (gap x[0,4] at z=-34) ---
+    // frame posts + lintel (visual only, no collision so the doorway stays clean)
+    const frameM = this.matLib.metal;
+    this.box(0.25, 1.5, -34, 0.3, 3.0, 0.5, frameM, false);
+    this.box(3.75, 1.5, -34, 0.3, 3.0, 0.5, frameM, false);
+    this.box(2, 3.0, -34, 4.0, 0.3, 0.5, frameM, false);
+    // leaf: thin box 3.2w x 2.8h x 0.3d at (2,1.4,-34); collider slab matches exactly
+    const leafW = this.box(2, 1.4, -34, 3.2, 2.8, 0.3, this.matLib.wood);
+    this.doorSlabs.push({ id: 'door-warehouse', min: V(0.4, 0, -34.15), max: V(3.6, 2.8, -33.85) });
+    this.interactables.push({
+      id: 'door-warehouse', pos: V(2, 1.2, -33), radius: 3,
+      label: 'Apri la porta laterale (magazzino)', kind: 'door', taken: false, mesh: leafW,
+    });
+    // --- door-villa: forecourt fence at z=-23 with a central gate leaf ---
+    const fenceM = this.mat(0x2b2f36);
+    this.box(-3.85, 1.0, -23, 5.3, 2.0, 0.4, fenceM);   // west fence x[-6.5,-1.2]
+    this.box(3.85, 1.0, -23, 5.3, 2.0, 0.4, fenceM);    // east fence x[1.2,6.5]
+    this.box(-1.35, 1.35, -23, 0.3, 2.7, 0.5, frameM, false);
+    this.box(1.35, 1.35, -23, 0.3, 2.7, 0.5, frameM, false);
+    const gateLeaf = this.box(0, 1.25, -23, 2.4, 2.5, 0.25, this.matLib.rustMetal);
+    this.doorSlabs.push({ id: 'door-villa', min: V(-1.2, 0, -23.125), max: V(1.2, 2.5, -22.875) });
+    this.interactables.push({
+      id: 'door-villa', pos: V(0, 1.25, -22), radius: 3,
+      label: 'Apri il cancello (villa)', kind: 'door', taken: false, mesh: gateLeaf,
+    });
+  }
+
+  /** HIDING SPOTS: 2 dumpsters with lids + 2 tarp carts. See `hidingSpots` contract above. */
+  private hidingInit(): void {
+    const V = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, y, z);
+    const dumpster = (hx: number, hz: number, id: string): void => {
+      this.box(hx, 0.7, hz, 2.2, 1.4, 1.2, this.matLib.tarp);            // body (cover + collider)
+      this.box(hx, 1.48, hz, 2.3, 0.15, 1.3, this.matLib.metal, false);  // lid (visual only)
+      this.hidingSpots.push(V(hx, 0, hz));
+      this.interactables.push({
+        id, pos: V(hx, 0.8, hz), radius: 2,
+        label: 'Nasconditi (cassonetto)', kind: 'hide', taken: false,
+      });
+    };
+    const tarpCart = (hx: number, hz: number, id: string): void => {
+      this.box(hx, 0.45, hz, 1.6, 0.9, 1.1, this.matLib.wood);           // cart base (collider)
+      this.box(hx, 1.05, hz, 1.7, 0.35, 1.2, this.matLib.tarp, false);   // tarp cover (visual)
+      this.hidingSpots.push(V(hx, 0, hz));
+      this.interactables.push({
+        id, pos: V(hx, 0.8, hz), radius: 2,
+        label: 'Nasconditi (carretto)', kind: 'hide', taken: false,
+      });
+    };
+    dumpster(-11, 6, 'hide-1');    // west alley dumpster
+    dumpster(10, -4, 'hide-2');    // east alley dumpster
+    tarpCart(-3, 26, 'hide-3');    // plaza/market tarp cart
+    tarpCart(31, 23, 'hide-4');    // canal south mouth tarp cart
+  }
+
+  /** VENTS: 2 crawl vents (grate + dark inset at each end). See `vents` contract above. */
+  private ventsInit(): void {
+    const V = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, y, z);
+    const dark = new THREE.MeshStandardMaterial({ color: 0x05070a, roughness: 1 });
+    const end = (ventId: string, endTag: 'a' | 'b', x: number, z: number): void => {
+      // low concrete housing (no collision: teleport destination must stay walkable)
+      this.box(x, 0.45, z, 1.4, 0.9, 1.4, this.matLib.concrete, false);
+      // dark inset (crawl opening, visual only)
+      const inset = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.7, 0.1), dark);
+      inset.position.set(x, 0.45, z + 0.71);
+      this.group.add(inset);
+      // grate bars (visual only)
+      for (let i = -1; i <= 1; i++) {
+        this.box(x + i * 0.3, 0.45, z + 0.78, 0.08, 0.7, 0.06, this.matLib.metal, false);
+      }
+      this.interactables.push({
+        id: `${ventId}-${endTag}`, pos: V(x, 0.8, z), radius: 2.5,
+        label: 'Striscia nel condotto', kind: 'vent', taken: false,
+      });
+    };
+    const v1a = V(-12, 0.8, 2); const v1b = V(-4, 0.8, -18);   // west alley <-> north courtyard
+    end('vent-1', 'a', v1a.x, v1a.z);
+    end('vent-1', 'b', v1b.x, v1b.z);
+    this.vents.push({ id: 'vent-1', a: v1a, b: v1b });
+    const v2a = V(11, 0.8, -8); const v2b = V(6, 0.8, 20);     // east alley <-> south plaza
+    end('vent-2', 'a', v2a.x, v2a.z);
+    end('vent-2', 'b', v2b.x, v2b.z);
+    this.vents.push({ id: 'vent-2', a: v2a, b: v2b });
+  }
+
+  /** M7 CHASE TUNING: runner loop (index 8) passing plaza + canal + market.
+   *  INTERCEPTION POINTS (>=2, for central/mission briefing):
+   *  - I1 PLAZA CROSSING (0,18)->(12,14): cuts the market-stall gap; ambush from E2/E3 roofs
+   *  - I2 CANAL CHOKE (33,8)->(33,20): straight walled corridor; pipe-climb drop or breaker-alley blackout
+   *  - I3 MARKET SLALOM (8,26)->(-6,24): across the crate maze; smoke + generator masking (bonus). */
+  private chaseRoute(): void {
+    const V = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, y, z);
+    // ROUTE 8: plaza north -> east lane -> canal mid -> canal south -> market south -> plaza west (loop)
+    this.patrolRoutes.push([
+      V(0, 0, 18), V(12, 0, 14), V(33, 0, 8), V(33, 0, 20), V(8, 0, 26), V(-6, 0, 24),
+    ]);
+  }
+
+  /** SMART CHECKPOINTS: 1 per mission, mid-objective, y=0, never inside a collider mass. */
+  private checkpointsInit(): void {
+    const V = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, y, z);
+    const C = (missionId: string, x: number, z: number): void => {
+      this.checkpoints.push({ missionId, pos: V(x, 0, z) });
+    };
+    C('m1-ombra', -8, -6);       // mid alley crossing, between west alley and north court
+    C('m2-lama', 0, 18);        // plaza north edge, post-kill staging (clear of fountain)
+    C('m3-verticale', 10, 14);  // scaffold base, pre-climb (clear of scaffold collider)
+    C('m4-sigillo', 2, -36);    // warehouse interior, post-entry (open floor)
+    C('m5-fuga', 0, 16);        // mid lane, survive -> escape staging
+    C('m6-silenzio', 0, -20);   // villa approach, pre-ledger (south of villa mass)
+    C('m7-caccia', 2, 18);      // plaza interception I1, mid-hunt
+    C('m8-corvo', 0, 30);       // south lane, post-boss exfil staging
   }
 
   private patrols(): void {

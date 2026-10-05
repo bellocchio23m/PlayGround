@@ -51,7 +51,7 @@ ok(count(world, /ledges\.push/g) >= 9, `ledges.push sites grew (>=9, found ${cou
 const boxCount = count(world, /this\.box\(/g);
 // baseline (pre-phase-3) was 42 textual box calls; growth required, cap guards runaway draw calls
 ok(boxCount >= 65 && boxCount <= 400, `collider/box count sane (65-400, found ${boxCount})`);
-ok(world.includes('patrolRoutes') && count(world, /patrolRoutes\.push/g) === 3, '3 extra patrol routes (indices 5-7)');
+ok(world.includes('patrolRoutes') && count(world, /patrolRoutes\.push/g) >= 3, `extra patrol routes indices 5-7 kept + m7 chase route 8 (found ${count(world, /patrolRoutes\.push/g)} pushes)`);
 ok(world.includes('groundHeight') && world.includes('losBlocked'), 'collision/LOS helpers intact');
 ok(world.includes("id: 'relic'") && world.includes('cache-smoke'), 'existing interactables intact');
 ok(world.includes('-46'), 'bounds ±46 kept');
@@ -114,6 +114,61 @@ for (const tok of ['spawns?', 'setFlag?', 'narrative?', 'ghostBonusXp?']) {
   ok(framework.includes(tok), `framework has optional field ${tok}`);
 }
 ok(framework.includes('advanceObjective') && framework.includes('startMission'), 'framework behavior intact');
+
+console.log('level-design pack: doors / hiding / vents / m7 chase / replay / checkpoints');
+ok(world.includes('doorSlabs'), 'world exports doorSlabs');
+ok(count(world, /doorSlabs\.push/g) === 2, 'doorSlabs has exactly 2 entries');
+ok(world.includes("'door-warehouse'") && world.includes("'door-villa'"), 'door ids present');
+ok(count(world, /kind: 'door'/g) === 2, "2 interactables with kind 'door'");
+ok(world.includes("id: 'door-warehouse'") && world.includes("id: 'door-villa'"), 'door interactable ids present');
+ok(world.includes('hidingSpots'), 'world exports hidingSpots');
+ok(count(world, /kind: 'hide'/g) === 2, "hide spots use kind 'hide' (2 helpers x2 calls = 4 spots)");
+for (const id of ['hide-1', 'hide-2', 'hide-3', 'hide-4']) {
+  ok(world.includes(`'${id}'`), `hiding interactable present: ${id}`);
+}
+ok(world.includes('vents'), 'world exports vents');
+ok(count(world, /vents\.push/g) === 2, 'vents has exactly 2 entries');
+ok(world.includes("'vent-1'") && world.includes("'vent-2'"), 'vent ids present');
+ok(count(world, /kind: 'vent'/g) === 1, "vent interactables use kind 'vent' (single helper, 4 ends)");
+for (const id of ['vent-1-a', 'vent-1-b', 'vent-2-a', 'vent-2-b']) {
+  void id; // ends are generated via template `${ventId}-${endTag}` — checked below
+}
+ok(world.includes('${ventId}-${endTag}'), 'vent end interactable ids generated per end (a/b)');
+ok(world.includes('chaseRoute'), 'm7 chase route builder present (route index 8)');
+ok(missions.includes("{ kind: 'ranger', route: 8 }"), 'm7 runner spawn points at chase route 8');
+// route 8 loop: parse the chaseRoute push block, require >=4 waypoints
+{
+  const m = world.match(/private chaseRoute\(\): void \{([\s\S]*?)\n  \}/);
+  ok(!!m, 'chaseRoute block parsed');
+  const pts = m ? [...m[1].matchAll(/V\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)/g)].map((x) => ({ x: +x[1], y: +x[2], z: +x[3] })) : [];
+  ok(pts.length >= 4, `m7 chase loop length>=4 (found ${pts.length})`);
+  const nearPlaza = pts.some((p) => Math.hypot(p.x - 0, p.z - 22) <= 6);
+  ok(nearPlaza, 'm7 chase loop passes within 6m of plaza (0,22)');
+  const nearCanal = pts.some((p) => Math.abs(p.x - 33) <= 3);
+  ok(nearCanal, 'm7 chase loop passes canal (x~33)');
+  const nearMarket = pts.some((p) => Math.hypot(p.x - 0, p.z - 24) <= 8);
+  ok(nearMarket, 'm7 chase loop passes market/plaza south');
+  ok(world.includes('I1') && world.includes('I2'), 'm7 >=2 interception points documented (I1/I2)');
+}
+ok(framework.includes('replayable?'), 'framework has optional field replayable?');
+ok(framework.includes('skipUnlocked?'), 'framework has optional field skipUnlocked?');
+ok(framework.includes('DEFAULT_REPLAYABLE') && framework.includes('?? DEFAULT_REPLAYABLE'), 'replayable defaults to true (isReplayable helper)');
+ok(world.includes('checkpoints'), 'world exports checkpoints');
+ok(count(world, /C\('m\d/g) === 8 || count(world, /checkpoints\.push/g) >= 1, 'checkpoints builder present');
+// parse checkpoint coords: C('mid', x, z) with y=0 in helper
+{
+  const cps = [...world.matchAll(/C\('([^']+)'\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)/g)].map((m) => ({ id: m[1], x: +m[2], z: +m[3] }));
+  ok(cps.length === 8, `8 checkpoints parsed (found ${cps.length})`);
+  for (const mid of ['m1-ombra', 'm2-lama', 'm3-verticale', 'm4-sigillo', 'm5-fuga', 'm6-silenzio', 'm7-caccia', 'm8-corvo']) {
+    ok(cps.some((c) => c.id === mid), `checkpoint present for ${mid}`);
+  }
+  cps.forEach((c) => {
+    const inside = masses.some(([x0, x1, z0, z1]) => c.x > x0 - 0.3 && c.x < x1 + 0.3 && c.z > z0 - 0.3 && c.z < z1 + 0.3);
+    ok(!inside, `checkpoint ${c.id} not inside a collider (approx) (${c.x},${c.z})`);
+    ok(c.x >= -46 && c.x <= 46 && c.z >= -46 && c.z <= 46, `checkpoint ${c.id} inside bounds`);
+  });
+  ok(world.includes('pos: V(x, 0, z)'), 'checkpoints on ground (y=0)');
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

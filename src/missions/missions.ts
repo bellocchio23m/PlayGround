@@ -14,7 +14,7 @@ export const MISSIONS: MissionDef[] = [
       { id: 'reach-court', text: 'Raggiungi il cortile nord', kind: 'reach', target: V(2, 0, -20), radius: 4 },
     ],
     failOnDeath: true, rewardXp: 100, rewardTools: { knives: 1 },
-    start: V(0, 0, 30),
+    start: V(-3.5, 0, 31),
   },
   {
     id: 'm2-lama', name: '2 — La Lama Silenziosa',
@@ -83,8 +83,8 @@ export const MISSIONS: MissionDef[] = [
       { id: 'escape-hunt', text: 'Fuggi al punto di estrazione', kind: 'escape', target: V(0, 0, 34), radius: 5 },
     ],
     failOnDeath: true, rewardXp: 450, rewardTools: { smoke: 1, knives: 2 },
-    start: V(0, 0, 30),
-    spawns: [{ kind: 'ranger', route: 7 }, { kind: 'guard', route: 1 }, { kind: 'guard', route: 6 }],
+    start: V(4.5, 0, 31),
+    spawns: [{ kind: 'ranger', route: 8 }, { kind: 'guard', route: 1 }, { kind: 'guard', route: 6 }],
   },
   {
     id: 'm8-corvo', name: '8 — Il Corvo',
