@@ -1,4 +1,4 @@
-// Reproducible in-game benchmark: scenarios A-J + zone reload + HUD/pause overhead.
+// Reproducible in-game benchmark: scenarios A-M + zone reload + HUD/pause overhead.
 // Measures avg/min fps, p95 frame time, spikes, draw calls, tris, heap, AI cost.
 // Results are ENVIRONMENT-RELATIVE (SwiftShader CPU vs real GPU) — never
 // present them as Galaxy A55 hardware measurements.
@@ -57,6 +57,10 @@ export interface BenchScenario {
   smokeNote?: boolean;
   /** Scenario exercises the optional setHud/setPaused hooks during warmup. */
   hudPause?: boolean;
+  /** Crowd scenario: extras via spawnExtra are guards only; civili reuse existing. */
+  crowdNote?: boolean;
+  /** Measure-window seconds for this scenario (default 5; soak uses 20). */
+  durS?: number;
 }
 
 export const SCENARIOS: BenchScenario[] = [
@@ -70,12 +74,15 @@ export const SCENARIOS: BenchScenario[] = [
   { id: 'H: dense + smoke', enemies: 9, bot: 'smoke', combat: true, desc: 'civilians + patrols + smoke fx', smokeNote: true },
   { id: 'I: search-AI patrol', enemies: 9, bot: 'circle', combat: false, desc: 'patrol/search AI, no forced combat' },
   { id: 'J: hud + pause overhead', enemies: 0, bot: 'idle', combat: false, desc: 'hud toggle + pause/resume via optional hooks', hudPause: true },
+  { id: 'K: smoke + knives VFX', enemies: 9, bot: 'smoke', combat: true, desc: 'smoke + knives VFX (reuses smoke bot)', smokeNote: true },
+  { id: 'L: crowd-6 civilians', enemies: 6, bot: 'circle', combat: false, desc: 'crowd: extras are guards only via hooks; civili cannot spawn via hooks — reuses existing + notes closest', crowdNote: true },
+  { id: 'M: long soak 20s', enemies: 9, bot: 'duel', combat: true, desc: 'long soak stability (20s measure)', durS: 20 },
 ];
 
 /** Manual checklist — boot/offline cannot be measured in-page. No fake numbers. */
 export const BENCH_MANUAL_CHECKLIST =
   'MANUAL (do not fake numbers): [ ] cold boot to menu <= 3s on target device; ' +
-  '[ ] airplane-mode reload playable offline (sw.js cached); [ ] F4 in-page runs attached for A-J + zone.';
+  '[ ] airplane-mode reload playable offline (sw.js cached); [ ] F4 in-page runs attached for A-M + zone.';
 
 /** Map extended bot modes onto the legacy central union. duel/smoke fight like combat. */
 export function baseBot(b: BenchBotMode | string): 'off' | 'circle' | 'combat' | 'traverse' {
@@ -135,12 +142,33 @@ export function auditHints(info: { calls: number; tris: number }): string[] {
   return out;
 }
 
+/**
+ * Static-prop merging audit (pure + tested). Extends auditHints with the
+ * scene-graph children count (group children / prop nodes).
+ * children>150 → merge windows/signs into InstancedMesh.
+ */
+export function staticMergeHints(calls: number, tris: number, children: number): string[] {
+  const out: string[] = [];
+  if (calls <= 0 && tris <= 0 && children <= 0) {
+    out.push('no scene data — run the F4 bench in-page');
+    return out;
+  }
+  if (calls > 200) out.push('CRITICAL: calls>200 — merge static props / atlas materials');
+  else if (calls > 120) out.push('calls>120 — consider merging static props');
+  if (tris > 300000) out.push('CRITICAL: tris>300k — reduce far geometry / tighten fog cull');
+  else if (tris > 150000) out.push('tris>150k — reduce far geometry');
+  if (children > 150) out.push('children>150 — merge windows/signs into InstancedMesh');
+  else if (children > 80) out.push('children>80 — consider merging static props');
+  if (out.length === 0) out.push('static batching OK for A55-class hardware');
+  return out;
+}
+
 export class BenchRunner {
   active = false;
   private idx = -1;
   private phase: 'warmup' | 'measure' | 'zone' | 'done' = 'warmup';
   private t = 0;
-  private frames = new Float32Array(900);
+  private frames = new Float32Array(3600);
   private n = 0;
   private zoneTimes: number[] = [];
   private hudMs = -1;
@@ -190,6 +218,7 @@ export class BenchRunner {
     this.hooks.forceCombat(s.combat);
     this.driveBot(s.bot);
     if (s.smokeNote) this.notes.push(`${s.id}: smoke FX is central-side; no smoke hook exists in BenchHooks.`);
+    if (s.crowdNote) this.notes.push(`${s.id}: extras via spawnExtra are guards only; civili cannot spawn via BenchHooks — reuses existing crowd, notes closest.`);
     this.hudDone = false;
     this.phase = 'warmup';
     this.t = 0;
@@ -257,9 +286,10 @@ export class BenchRunner {
       }
       return null;
     }
-    // measure 5s
+    // measure window: per-scenario durS (default 5s; soak uses 20s)
     if (this.n < this.frames.length) this.frames[this.n++] = dt * 1000;
-    if (this.t >= 5.0) {
+    const dur = SCENARIOS[this.idx]?.durS ?? 5;
+    if (this.t >= dur) {
       const s = SCENARIOS[this.idx];
       const info = h.info();
       const res = this.compute(s.id, info.enemies);
@@ -297,7 +327,7 @@ export class BenchRunner {
 
   status(): string {
     if (!this.active) return '';
-    if (this.phase === 'zone') return `BENCH K: zone reload ${this.zoneTimes.length}/3`;
+    if (this.phase === 'zone') return `BENCH Z: zone reload ${this.zoneTimes.length}/3`;
     const s = SCENARIOS[this.idx];
     return `BENCH ${s.id} [${this.phase}] ${this.t.toFixed(1)}s`;
   }

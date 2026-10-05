@@ -14,6 +14,8 @@ const SUITES = [
   './ai.test.mjs',
   './world.test.mjs',
   './ux.test.mjs',
+  './perf.test.mjs',
+  './pwa.test.mjs',
 ];
 
 let pass = 0; let fail = 0; let skip = 0;

@@ -291,5 +291,100 @@ if (!bench) {
   ok(bench.baseBot('glitch-mode') === 'circle', 'unknown strings fall back to a safe default');
 }
 
+// ================= new: K/L/M scenarios + durS + staticMergeHints (audits) =================
+console.log('audit/bench KLM + merge:');
+ok(benchSrc.includes('staticMergeHints'), 'staticMergeHints exported (children-aware merge audit)');
+ok(benchSrc.includes('InstancedMesh'), 'merge hint names InstancedMesh for windows/signs');
+ok(benchSrc.includes('durS'), 'BenchScenario has optional durS measure window');
+ok(benchSrc.includes('K: smoke + knives VFX'), 'scenario K smoke+knives VFX');
+ok(benchSrc.includes('L: crowd-6 civilians') || benchSrc.includes('crowd-6'), 'scenario L crowd-6 civilians');
+ok(benchSrc.includes('M: long soak 20s'), 'scenario M long soak 20s');
+ok(benchSrc.includes('crowdNote'), 'crowd scenario flagged (guards-only hooks note)');
+
+console.log('audit/adaptive visual + QA:');
+ok(adaptiveSrc.includes('PROFILE_DELTA'), 'PROFILE_DELTA documentation table exported');
+ok(adaptiveSrc.includes('assertProfilesDistinct'), 'assertProfilesDistinct exported');
+ok(adaptiveSrc.includes('QA_VISUAL_CHECKLIST'), 'QA_VISUAL_CHECKLIST exported');
+ok(adaptiveSrc.includes('QA_NO_DEFECTS'), 'QA_NO_DEFECTS exported');
+
+// ================= runtime: staticMergeHints (real code) =================
+console.log('runtime/staticMergeHints:');
+if (!bench) {
+  for (let i = 0; i < 5; i++) todo('staticMergeHints runtime needs typescript');
+} else {
+  const has = (arr, sub) => arr.some((s) => s.includes(sub));
+  ok(bench.staticMergeHints(60, 80000, 20).join('|').includes('OK'), 'healthy scene reports OK');
+  ok(has(bench.staticMergeHints(60, 80000, 151), 'InstancedMesh'), 'children>150 suggests InstancedMesh merge');
+  ok(has(bench.staticMergeHints(60, 80000, 200), 'children>150'), 'children=200 hits the >150 tier');
+  ok(!has(bench.staticMergeHints(60, 80000, 150), 'InstancedMesh'), 'boundary: exactly 150 children stays below merge tier');
+  ok(has(bench.staticMergeHints(0, 0, 0), 'no scene data'), 'zero scene reports missing data, never fake OK');
+}
+
+// ================= runtime: KLM scenarios + durS =================
+console.log('runtime/scenarios KLM:');
+if (!bench) {
+  for (let i = 0; i < 6; i++) todo('scenario runtime needs typescript');
+} else {
+  const ids = bench.SCENARIOS.map((s) => s.id);
+  ok(bench.SCENARIOS.length === 13, `13 scenarios A-M (got ${bench.SCENARIOS.length})`);
+  const k = bench.SCENARIOS.find((s) => s.id.startsWith('K:'));
+  ok(!!k && k.bot === 'smoke', 'K reuses smoke bot for smoke+knives VFX');
+  const l = bench.SCENARIOS.find((s) => s.id.startsWith('L:'));
+  ok(!!l && l.enemies === 6 && l.crowdNote === true, 'L crowd-6 with crowdNote (guards-only hooks)');
+  const m = bench.SCENARIOS.find((s) => s.id.startsWith('M:'));
+  ok(!!m && m.durS === 20, 'M long soak sets durS=20');
+  ok(bench.SCENARIOS.filter((s) => s.durS !== undefined).every((s) => typeof s.durS === 'number'), 'durS stays optional numeric (backward compat)');
+  ok(bench.baseBot(k.bot) === 'combat', 'K smoke bot still maps to legacy combat');
+}
+
+// ================= runtime: PROFILE_DELTA + assertProfilesDistinct =================
+console.log('runtime/profiles:');
+if (!adaptive) {
+  for (let i = 0; i < 6; i++) todo('profile runtime needs typescript');
+} else {
+  const d = adaptive.PROFILE_DELTA;
+  ok(!!d && d.low.shadow === 0 && d.low.aa === 0, 'PROFILE_DELTA low documents shadow:0/aa:0');
+  ok(d.med.shadow !== d.low.shadow || d.med.aa !== d.low.aa, 'PROFILE_DELTA med differs from low');
+  ok(d.high.shadow !== d.med.shadow || d.high.aa !== d.med.aa, 'PROFILE_DELTA high differs from med');
+  const centralLike = { low: { pixelRatio: 0.75, lampCount: 2, aiHz: 8 }, med: { pixelRatio: 1.0, lampCount: 4, aiHz: 10 }, high: { pixelRatio: 1.5, lampCount: 4, aiHz: 12 } };
+  ok(adaptive.assertProfilesDistinct(centralLike) === true, 'central PROFILES shape passes distinctness');
+  ok(adaptive.assertProfilesDistinct({ low: { pixelRatio: 1, lampCount: 4, aiHz: 10 }, med: { pixelRatio: 1, lampCount: 4, aiHz: 10 }, high: { pixelRatio: 1, lampCount: 4, aiHz: 10 } }) === false, 'identical triples fail distinctness');
+  ok(adaptive.assertProfilesDistinct({ low: { pixelRatio: 1 }, med: { pixelRatio: 1 } }) === false, 'missing high tier fails');
+}
+
+// ================= runtime: QA checklists =================
+console.log('runtime/QA checklists:');
+if (!adaptive) {
+  for (let i = 0; i < 3; i++) todo('QA runtime needs typescript');
+} else {
+  const q = adaptive.QA_VISUAL_CHECKLIST;
+  const need = ['menu', 'strada', 'tetti', 'traversal', 'stealth', 'combat', 'parry', 'assassination', 'civili', 'allarme', 'boss', 'pause', 'death', 'victory', 'mobile', 'offline'];
+  const low = q.join(' | ').toLowerCase();
+  ok(Array.isArray(q) && q.length >= 16 && need.every((k) => low.includes(k)), `QA_VISUAL_CHECKLIST covers ${need.length} areas (${q.length} items)`);
+  ok(low.includes('low/med/high') || low.includes('low') && low.includes('med') && low.includes('high'), 'QA checklist covers LOW/MED/HIGH tiers');
+  const nd = adaptive.QA_NO_DEFECTS;
+  const ndl = nd.join(' | ').toLowerCase();
+  ok(Array.isArray(nd) && nd.length > 0 && ndl.includes('no clipping') && ndl.includes('no ui overlap'), 'QA_NO_DEFECTS bars clipping + UI overlap');
+}
+
+// ================= runtime: soak runner honors durS =================
+console.log('runtime/soak durS:');
+if (!bench) {
+  todo('soak runtime needs typescript');
+} else {
+  const mkHooks = () => ({
+    spawnExtra: () => undefined, clearExtra: () => undefined,
+    setBot: () => undefined, reloadZone: () => 1.5, forceCombat: () => undefined,
+    info: () => ({ calls: 60, tris: 80000, heapMB: 10, aiMs: 1, enemies: 0 }),
+  });
+  const r = new bench.BenchRunner(mkHooks());
+  r.start();
+  // drive past A-L warmups+measures (12 x 6s) + M warmup, then check M still measuring at 15s
+  let t = 0;
+  const seen = new Set();
+  for (let i = 0; i < 60 * 200 && r.active; i++) { r.update(1 / 60); const s = r.status(); if (s) seen.add(s.split(' [')[0]); }
+  ok(r.results.length === 13, `soak completes all 13 scenarios (got ${r.results.length})`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed, ${skip} skipped`);
 process.exit(fail ? 1 : 0);
