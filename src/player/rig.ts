@@ -65,12 +65,17 @@ export function buildRig(kind: 'kestrel' | 'guard' | 'elite' | 'captain'): Rig {
   return { group, hips, torso, head, armL, armR, legL, legR, sword, blade, cloak };
 }
 
-/** Procedural locomotion/pose animator — writes rotations only, no allocations. */
+/** Procedural locomotion/pose animator — writes rotations only, no allocations.
+ *  Phase-3 contextual variety (all scalar blends, zero alloc):
+ *  - slide pose: `state==='slide'` or opts.slide 0..1 (deep crouch, lean back, legs fwd)
+ *  - roll pose: opts.roll 0..1 (shoulder-tuck overlay, works over any state)
+ *  - run-to-stop skid: opts.skid 0..1 (lean back, split stance, cloak flings fwd)
+ *  - idle breath: two incommensurate oscillators so idle never visibly loops. */
 export class PoseAnimator {
   time = 0;
   crouchBlend = 0;
 
-  animate(rig: Rig, state: MoveState, speed: number, dt: number, opts: { crouch: boolean; attacking: number; parry: number; dodge: number; dead: boolean; stagger: number } = { crouch: false, attacking: 0, parry: 0, dodge: 0, dead: false, stagger: 0 }): void {
+  animate(rig: Rig, state: MoveState, speed: number, dt: number, opts: { crouch: boolean; attacking: number; parry: number; dodge: number; dead: boolean; stagger: number; slide?: number; roll?: number; skid?: number } = { crouch: false, attacking: 0, parry: 0, dodge: 0, dead: false, stagger: 0 }): void {
     this.time += dt * (1 + speed * 0.35);
     const t = this.time;
     const target = opts.crouch ? 1 : 0;
@@ -99,9 +104,15 @@ export class PoseAnimator {
       return;
     }
     if (state === 'idle' || speed < 0.2) {
-      const b = Math.sin(t * 2) * 0.03;
+      // idle breath: layered oscillators (2.0Hz + 0.93Hz + slow sway) so the
+      // loop period never visibly repeats; chest lift + shoulder drift.
+      const b = Math.sin(t * 2) * 0.03 + Math.sin(t * 0.93 + 1.7) * 0.02;
+      const b2 = Math.sin(t * 0.6 + 0.5) * 0.025;
       A.rotation.x = b; B.rotation.x = -b;
+      A.rotation.z = 0.12 + b2; B.rotation.z = -0.12 - b2;
       rig.torso.rotation.y = Math.sin(t * 0.7) * 0.04;
+      rig.torso.rotation.x = b2;
+      rig.hips.position.y += Math.sin(t * 2 + 0.3) * 0.015 + Math.sin(t * 0.93) * 0.01;
     } else {
       const s1 = Math.sin(f) * (0.55 * swing + 0.1);
       const s2 = Math.sin(f + Math.PI) * (0.55 * swing + 0.1);
@@ -172,6 +183,41 @@ export class PoseAnimator {
       const d = Math.sin(Math.min(1, opts.dodge) * Math.PI);
       rig.hips.rotation.z = 1.4 * d;
       rig.hips.position.y -= 0.35 * d;
+    }
+    // crouch-slide pose: deep seat, torso leaned back, legs shot forward,
+    // arms trailing low/out, cloak pressed down by the wind.
+    const slideK = opts.slide !== undefined && opts.slide > 0 ? Math.min(1, opts.slide) : (state === 'slide' ? 1 : 0);
+    if (slideK > 0) {
+      rig.hips.position.y -= 0.42 * slideK;
+      rig.hips.rotation.x = -0.35 * slideK;
+      rig.torso.rotation.x = -0.25 * slideK;
+      L.rotation.x = -1.1 * slideK; R.rotation.x = -0.85 * slideK;
+      L.rotation.z = 0.15 * slideK; R.rotation.z = -0.15 * slideK;
+      A.rotation.set(0.6 * slideK, 0, 0.6); B.rotation.set(0.6 * slideK, 0, -0.6);
+      rig.head.rotation.x = 0.2 * slideK;
+      rig.cloak.rotation.x = -0.5 * slideK + 0.15;
+    }
+    // landing-roll pose: shoulder tuck overlay (blends out with opts.roll 1→0);
+    // auto-tucks on fast landings (state landing + speed > 5) as a fallback.
+    const rollK = opts.roll !== undefined && opts.roll > 0 ? Math.min(1, opts.roll) : (state === 'landing' && speed > 5 ? 0.7 : 0);
+    if (rollK > 0) {
+      rig.hips.position.y -= 0.3 * rollK;
+      rig.hips.rotation.x = 0.9 * rollK;
+      rig.torso.rotation.x = 0.4 * rollK;
+      A.rotation.set(-1.8 * rollK, 0, 0.5); B.rotation.set(-1.8 * rollK, 0, -0.5);
+      L.rotation.x = -1.2 * rollK; R.rotation.x = -1.1 * rollK;
+      rig.head.rotation.x = 0.5 * rollK;
+    }
+    // run-to-stop skid: lean back against momentum, split stance (front leg
+    // braced, rear leg trailing), arms out for balance, cloak flings forward.
+    const skidK = opts.skid !== undefined ? Math.min(1, Math.max(0, opts.skid)) : 0;
+    if (skidK > 0.01 && slideK <= 0) {
+      rig.hips.rotation.x = -0.3 * skidK;
+      rig.torso.rotation.x = -0.2 * skidK;
+      L.rotation.x = -0.7 * skidK; R.rotation.x = 0.5 * skidK;
+      A.rotation.x = 0.5 * skidK; B.rotation.x = 0.4 * skidK;
+      A.rotation.z = 0.5 * skidK; B.rotation.z = -0.5 * skidK;
+      rig.cloak.rotation.x = -0.3 - skidK * 0.4;
     }
   }
 }

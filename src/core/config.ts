@@ -10,7 +10,7 @@ export const MoveState = {
   Idle: 'idle', Walk: 'walk', Run: 'run', Sprint: 'sprint', Crouch: 'crouch',
   Jump: 'jump', Fall: 'fall', Landing: 'landing', Vault: 'vault', Climb: 'climb',
   Dodge: 'dodge', Attack: 'attack', Parry: 'parry', Hit: 'hit', Death: 'death',
-  Hang: 'hang', Mantle: 'mantle',
+  Hang: 'hang', Mantle: 'mantle', Slide: 'slide',
 } as const;
 export type MoveState = (typeof MoveState)[keyof typeof MoveState];
 
