@@ -35,3 +35,9 @@ Six baseline cases cover English/Arabic at viewport widths of 320, 390 and 1280 
 Three negative controls change only the browser's temporary DOM: wrong document direction, lost pressed state, and stale feedback. Each control passes only if the exact expected error is detected. The original HTML fixture stays unchanged. See `recorded-checks.json` for a recorded run against this fixture on 26 October 2026.
 
 These results cover Chromium and this fixture only. They are not linguistic certification, a full accessibility audit, support for every browser, or validation of a booking backend. Visual and assistive-technology review remain separate tasks for a real product.
+
+## Optional JSON-file checks
+
+The browser demonstration above is free to inspect. For a separate offline check of flat JSON translation files, [LocaleCheck 1.0.0 is available for EUR29, once](https://bellocchio2.gumroad.com/l/localecheck-json). It includes the Python 3.10+ standard-library utility, ten automated test methods, fictional sample files, recorded reports, an English guide and an Italian quick start.
+
+It checks missing/extra keys, blank translations and ASCII `{name}` placeholders. It does not validate nested JSON, ICU/plurals, HTML or linguistic quality. The store lists the licence, requirements and checkout total; there is no subscription. Buying the kit is optional and is not required to run this interface demonstration.
