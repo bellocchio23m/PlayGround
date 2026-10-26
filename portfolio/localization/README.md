@@ -42,7 +42,7 @@ The browser demonstration above is free to inspect. For a separate offline check
 
 It checks missing/extra keys, blank translations and ASCII `{name}` placeholders. It does not validate nested JSON, ICU/plurals, HTML or linguistic quality. The store lists the licence, requirements and checkout total; there is no subscription. Buying the kit is optional and is not required to run this interface demonstration.
 
-For work on your own files, the [service catalogue](https://bellocchio2.gumroad.com/) lists three small fixed-scope services: text-based PDF invoices to Excel (EUR79), CSV cleanup and mapping (introductory EUR79), and one reproducible Python/JavaScript data-script bug (EUR59). File/layout limits and one in-scope revision are specified on the catalogue. Public-source research and one-page website review remain available at EUR125 each. Scope, acceptance checks, delivery date, final price and payment/invoicing conditions are agreed before an order. No purchase is needed to request a fit check. These are service offers, not past client results.
+Before buying, read the [format limits, free alternative and support guide](https://bellocchio2.gumroad.com/). The purchase delivers the downloadable kit through Gumroad; it does not include custom freelance services.
 
 
 A separate [fictional PDF-to-Excel demonstration](../invoice-demo/) includes two generated sample invoices, a workbook generator and six reproducible checks. One deliberately inconsistent source total is retained and flagged. It supports the two demonstrated one-page layouts only; it is not a general invoice extractor or a previous client result.
