@@ -44,5 +44,28 @@ It checks missing/extra keys, blank translations and ASCII `{name}` placeholders
 
 Before buying, read the [format limits, free alternative and support guide](https://bellocchio2.gumroad.com/). The purchase delivers the downloadable kit through Gumroad; it does not include custom freelance services.
 
+### Small fictional example before buying
+
+This separate JSON example illustrates the paid kit's narrow checks; it does not require the interface demonstration. It is not a previous customer's file.
+
+Source `en.json`:
+
+```json
+{"welcome": "Hello {name}", "cta": "Continue"}
+```
+
+Deliberately broken target `it-broken.json`:
+
+```json
+{"welcome": "Ciao", "extra": "Demo"}
+```
+
+Running the kit's `python localecheck.py en.json it-broken.json` on 26 October 2026 returned exit code 1 and exactly these three findings:
+
+- `cta`: `missing_key`;
+- `extra`: `unexpected_key`;
+- `welcome`: `placeholder_mismatch`, missing `{name}`.
+
+This checks structure, not whether the Italian wording is correct. Invalid inputs return exit code 2; a valid matching target returns 0. Nested JSON and ICU are outside this kit's format. If you need broader free checks, compare [Lingual i18n-check (MIT)](https://github.com/lingualdev/i18n-check) before purchasing. No hosted account or API is required by the offline utility.
 
 A separate [fictional PDF-to-Excel demonstration](../invoice-demo/) includes two generated sample invoices, a workbook generator and six reproducible checks. One deliberately inconsistent source total is retained and flagged. It supports the two demonstrated one-page layouts only; it is not a general invoice extractor or a previous client result.
