@@ -41,3 +41,5 @@ These results cover Chromium and this fixture only. They are not linguistic cert
 The browser demonstration above is free to inspect. For a separate offline check of flat JSON translation files, [LocaleCheck 1.0.0 is available for EUR29, once](https://bellocchio2.gumroad.com/l/localecheck-json). It includes the Python 3.10+ standard-library utility, ten automated test methods, fictional sample files, recorded reports, an English guide and an Italian quick start.
 
 It checks missing/extra keys, blank translations and ASCII `{name}` placeholders. It does not validate nested JSON, ICU/plurals, HTML or linguistic quality. The store lists the licence, requirements and checkout total; there is no subscription. Buying the kit is optional and is not required to run this interface demonstration.
+
+For work on your own files or page, the [service catalogue](https://bellocchio2.gumroad.com/) lists three fixed-scope offers at EUR125 each: CSV cleanup, public-source research and one-page website review. The scope, delivery date and payment conditions are agreed before an order. No purchase is needed to request a quote.
