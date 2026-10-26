@@ -1,0 +1,69 @@
+{
+  "baseline": [
+    {
+      "width": 320,
+      "language": "en",
+      "errors": []
+    },
+    {
+      "width": 320,
+      "language": "ar",
+      "errors": []
+    },
+    {
+      "width": 390,
+      "language": "en",
+      "errors": []
+    },
+    {
+      "width": 390,
+      "language": "ar",
+      "errors": []
+    },
+    {
+      "width": 1280,
+      "language": "en",
+      "errors": []
+    },
+    {
+      "width": 1280,
+      "language": "ar",
+      "errors": []
+    }
+  ],
+  "negative_controls": [
+    {
+      "name": "wrong_direction",
+      "expected": [
+        "document_direction"
+      ],
+      "observed": [
+        "document_direction"
+      ],
+      "passed": true
+    },
+    {
+      "name": "lost_pressed_state",
+      "expected": [
+        "single_selection"
+      ],
+      "observed": [
+        "single_selection"
+      ],
+      "passed": true
+    },
+    {
+      "name": "stale_feedback",
+      "expected": [
+        "selection_feedback"
+      ],
+      "observed": [
+        "selection_feedback"
+      ],
+      "passed": true
+    }
+  ],
+  "external_requests": [],
+  "javascript_errors": [],
+  "scope": "Chromium and this fictional fixture only; not linguistic review or full accessibility certification."
+}
