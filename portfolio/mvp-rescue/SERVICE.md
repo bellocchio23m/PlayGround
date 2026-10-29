@@ -1,8 +1,10 @@
 # MVP Rescue
 
-**A prototype looks finished, but an essential workflow still fails. Get that workflow scoped, repaired and checked.**
+**Your app already exists, but a critical step still fails. Get the agreed workflow repaired, checked and handed back with its source.**
 
 For founders and small agencies with an existing web project: a form that does not save, a dashboard that loses state, broken validation, an incomplete responsive interface, or a disconnected step in an otherwise defined workflow.
+
+Start with the step you need to complete: **a request submitted, a record saved, and the result visible in the dashboard**. We work from your existing project and preserve the parts that work. The initial fit check is a short written review, not a free rebuild or an assurance that every stack can be repaired.
 
 ## A practical starting point
 
@@ -14,7 +16,7 @@ These are proposal starting prices, not a checkout or a promise to accept every 
 
 ## What to send first
 
-An explanation of the failing step, expected result, relevant stack and a safe sample or repository excerpt. Do not email passwords, production credentials, customer data or payment details. Access must be limited to what is necessary, preferably a separate branch or staging copy.
+The failing step, expected result, relevant stack and a safe sample or repository excerpt, plus your deadline and indicative budget. A sales call is not required for this first assessment. Do not email passwords, production credentials, customer data or payment details. Access must be limited to what is necessary, preferably a separate branch or staging copy.
 
 After the initial feasibility check, the proposal names the deliverable, exclusions and checks. Work is accepted only where required access and tools are available without upfront expenditure. Paid services, hosting costs, app-store charges, platform credits and new subscriptions are not included.
 
@@ -24,4 +26,4 @@ Readable source changes, an explanation of the cause, before/after evidence wher
 
 Communication can be asynchronous in writing. No unsupported claims of specialist security auditing, regulatory compliance, universal compatibility or guaranteed commercial results.
 
-The adjacent demo is an original synthetic sample, not an invented client engagement. Contact Marco Bellocchio through the channel where you received this proposal.
+The adjacent demo is an original synthetic sample, not an invented client engagement. It demonstrates browser-local JavaScript behavior and relevant tests; it does not establish production experience with your database, authentication or payments stack. Such work needs its own feasibility review and scope. Contact Marco Bellocchio through the channel where you received this proposal.
