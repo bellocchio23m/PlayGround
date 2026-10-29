@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {KEY,validate,read,save} from './dist/core.mjs';
+const input = {company:'Example Studio',email:'demo@example.test',details:'A fictional service request.'};
+function storage(){const map=new Map();return {getItem:k=>map.has(k)?map.get(k):null,setItem:(k,v)=>map.set(k,v),removeItem:k=>map.delete(k)};}
+test('new storage starts empty',()=>assert.deepEqual(read(storage()),[]));
+test('saved request survives a fresh read',()=>{const s=storage(); save(s,input,'a'); assert.equal(read(s)[0].company,input.company);});
+test('same submission ID is idempotent',()=>{const s=storage();save(s,input,'a');assert.equal(save(s,input,'a').duplicate,true);assert.equal(read(s).length,1);});
+test('different submissions are retained',()=>{const s=storage();save(s,input,'a');save(s,input,'b');assert.equal(read(s).length,2);});
+test('blank company fails without writing',()=>{const s=storage();assert.throws(()=>save(s,{...input,company:' '},'a'));assert.equal(s.getItem(KEY),null);});
+test('malformed email rejected',()=>assert.throws(()=>validate({...input,email:'invalid'})));
+test('overlong details rejected',()=>assert.throws(()=>validate({...input,details:'a'.repeat(2001)})));
+test('boundary lengths accepted',()=>assert.equal(validate({...input,company:'a'.repeat(120),details:'x'.repeat(2000)}).details.length,2000));
+test('corrupt JSON is preserved and rejected',()=>{const s=storage();s.setItem(KEY,'broken');assert.throws(()=>save(s,input,'a'));assert.equal(s.getItem(KEY),'broken');});
+test('unknown version rejected',()=>{const s=storage();s.setItem(KEY,JSON.stringify({version:2,requests:[]}));assert.throws(()=>read(s));});
+test('invalid stored rows rejected',()=>{const s=storage();s.setItem(KEY,JSON.stringify({version:1,requests:[{}]}));assert.throws(()=>read(s));});
+test('storage quota failure never reports success',()=>{const s={getItem:()=>null,setItem:()=>{throw Error('quota');}};assert.throws(()=>save(s,input,'a'),/Saving failed/);});
+test('markup stays literal data',()=>{const s=storage();save(s,{...input,company:'<img src=x onerror=alert(1)>'},'a');assert.equal(read(s)[0].company,'<img src=x onerror=alert(1)>');});
+test('100 row limit preserves previous records',()=>{const s=storage();for(let i=0;i<100;i++)save(s,input,String(i));assert.throws(()=>save(s,input,'overflow'),/capacity/);assert.equal(read(s).length,100);});
+test('invalid identifier and date rejected',()=>{assert.throws(()=>save(storage(),input,''));assert.throws(()=>save(storage(),input,'a','not-a-date'));});
