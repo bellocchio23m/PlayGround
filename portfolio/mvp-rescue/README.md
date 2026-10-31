@@ -32,3 +32,9 @@ Cloud Chrome UI verification on 29 October: initial empty state; fixed save; rep
 This is a browser-local demonstration. It has no user authentication, shared server database, delivery of emails, payment processing, production monitoring or security certification. Browser storage is not a multi-user backend. The submission token is for demo duplicate prevention, not an authentication credential. Clearing browser data removes records. The email check is basic syntax validation, not mailbox verification. `Before` is intentionally broken and explicitly labelled.
 
 Source: `dist/index.html`, `dist/app.mjs`, `dist/core.mjs`. `demo.html` packages the same source into one downloadable file. See [SERVICE.md](SERVICE.md) for the service proposal.
+
+## Prepare a real repair brief
+
+The free [bug brief worksheet](../resources/bug-report-brief.md) collects the affected action, reproduction and observable result. Agree on [acceptance criteria](../resources/acceptance-criteria.md) and a [bounded written scope](../resources/small-repair-scope.md) before commissioning work. An [Italian triage guide](../resources/triage-form-italiano.md) explains what to record when a form loses data after Save.
+
+The public [MVP Rescue service on Contra](https://contra.com/s/N3gqmcUE-mvp-rescue-fix-a-broken-form-or-dashboard-workflow) provides a route to request written scope and pricing. The demonstration above is original fictional material.
