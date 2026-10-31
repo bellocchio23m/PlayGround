@@ -69,3 +69,7 @@ Running the kit's `python localecheck.py en.json it-broken.json` on 26 October 2
 This checks structure, not whether the Italian wording is correct. Invalid inputs return exit code 2; a valid matching target returns 0. Version 1.1 additionally accepts nested objects with string leaves and uses JSON pointers in those reports. ICU, arrays and linguistic quality remain outside scope. If you need broader free checks, compare [Lingual i18n-check (MIT)](https://github.com/lingualdev/i18n-check) before purchasing. No hosted account or API is required by the offline utility.
 
 A separate [fictional PDF-to-Excel demonstration](../invoice-demo/) includes two generated sample invoices, a workbook generator and six reproducible checks. One deliberately inconsistent source total is retained and flagged. It supports the two demonstrated one-page layouts only; it is not a general invoice extractor or a previous client result.
+
+## Practical review worksheets
+
+Use the free [release checklist](../resources/json-release-checklist.md) to freeze source/target revisions before checking files. The [format decision table](../resources/json-format-fit.md) helps decide whether a schema fits LocaleCheck. A [handover template](../resources/localization-handover.md) records unresolved findings and actual release decisions. [Read the Italian workflow](../resources/controllo-json-italiano.md) or [browse all free resources](../resources/README.md).
