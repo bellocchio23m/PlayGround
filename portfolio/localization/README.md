@@ -36,13 +36,23 @@ Three negative controls change only the browser's temporary DOM: wrong document 
 
 These results cover Chromium and this fixture only. They are not linguistic certification, a full accessibility audit, support for every browser, or validation of a booking backend. Visual and assistive-technology review remain separate tasks for a real product.
 
-## Optional JSON-file checks
+## Your JSON translation checks don't need a monthly bill
 
-The browser demonstration above is free to inspect. For a separate offline review of JSON translation files, [LocaleCheck 1.1.0 is available for EUR29, once](https://bellocchio2.gumroad.com/l/localecheck-json). It includes a browser workspace that needs no installation or Python, an optional Python 3.10+ standard-library CLI, flat and nested fictional examples, HTML/CSV/JSON reports, 21 automated Python test methods, bilingual guides and a two-page PDF quick start. The new workspace was checked in managed Chromium with file inputs and downloads while offline; other browser engines and the buyer's local-file launch were not independently tested.
+**Check locally. Pay once. Keep your files under your control.**
 
-It checks missing/extra keys, blank translations and ASCII `{name}` placeholders. Flat JSON and nested objects with string leaves are supported; arrays, ICU/plurals, HTML and linguistic quality are outside scope. The store lists the licence, requirements and checkout total; there is no subscription. Buying the kit is optional and is not required to run this interface demonstration.
+[LocaleCheck 1.2](https://bellocchio2.gumroad.com/l/localecheck-json) is a separate downloadable workspace for checking JSON translation files before release or handoff. [Try the free live demo first](https://localecheck-demo.bellocchio23.chatgpt.site/) — no signup; one pair, 100 keys and 20 KiB per input. Buying is optional and is not required to inspect this interface demonstration.
 
-Before buying, read the [format limits, free alternative and support guide](https://bellocchio2.gumroad.com/). The purchase delivers the downloadable kit through Gumroad; it does not include custom freelance services.
+The current kit checks missing/extra keys, blank translations, simple ASCII `{name}` occurrence counts and documented ICU MessageFormat 1 syntax, argument roles and branch contracts. It accepts flat or nested JSON objects with string leaves, compares up to 20 targets and exports HTML/CSV/JSON reports. The EN/IT browser workspace and bundled Node CLI run without installing dependencies or contacting an API; the legacy Python 1.1 CLI remains simple-mode only.
+
+The EUR29 one-time list price buys the delivered version. Checkout shows applicable taxes and currency. No subscription is required to run the downloaded kit; future updates and custom services are not promised. Original files are not modified or uploaded. Source, fictional examples, documentation, licences and automated tests are included. The current release was verified with 55 Node tests, ZIP integrity checks and Chromium previews; local-file launch, Firefox, Safari and physical phones were not independently verified in this environment.
+
+This checks structure, not translation quality or actual on-screen rendering. Arrays, empty objects, MessageFormat 2, printf and HTML validation are outside scope. [Read the current product page for exact formats, ICU limits, requirements and licence](https://bellocchio2.gumroad.com/l/localecheck-json).
+
+### Challenge the next subscription
+
+**Which recurring localization task would you stop paying for if you could do it reliably on your own computer?** [Describe your real workflow in the public roadmap thread](https://github.com/bellocchio23m/PlayGround/issues/7): file format, current workaround, time/cost and a concrete acceptance test. Use fictional examples.
+
+A separate private preview explores glossary rules, source-change review, exact-text reuse, pseudolocalization and portable review projects. These extras are not in the public kit yet; this feedback invitation is not a new product release.
 
 ### Small fictional example before buying
 
@@ -66,7 +76,7 @@ Running the kit's `python localecheck.py en.json it-broken.json` on 26 October 2
 - `extra`: `unexpected_key`;
 - `welcome`: `placeholder_mismatch`, missing `{name}`.
 
-This checks structure, not whether the Italian wording is correct. Invalid inputs return exit code 2; a valid matching target returns 0. Version 1.1 additionally accepts nested objects with string leaves and uses JSON pointers in those reports. ICU, arrays and linguistic quality remain outside scope. If you need broader free checks, compare [Lingual i18n-check (MIT)](https://github.com/lingualdev/i18n-check) before purchasing. No hosted account or API is required by the offline utility.
+This checks structure, not whether the Italian wording is correct. Invalid inputs return exit code 2; a valid matching target returns 0. That recorded example used the older simple-mode CLI. The current 1.2 workspace additionally supports the documented ICU MessageFormat 1 checks; arrays and linguistic quality remain outside scope. If you need broader free checks, compare [Lingual i18n-check (MIT)](https://github.com/lingualdev/i18n-check) before purchasing. No hosted account or API is required by the offline utility.
 
 A separate [fictional PDF-to-Excel demonstration](../invoice-demo/) includes two generated sample invoices, a workbook generator and six reproducible checks. One deliberately inconsistent source total is retained and flagged. It supports the two demonstrated one-page layouts only; it is not a general invoice extractor or a previous client result.
 
