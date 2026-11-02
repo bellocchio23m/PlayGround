@@ -1,8 +1,12 @@
 # Marco Bellocchio — practical tools and original demonstrations
 
-## Review JSON translations before handoff
+## Your JSON translation checks. No monthly bill.
 
-[LocaleCheck](https://bellocchio2.gumroad.com/l/localecheck-json) is an offline JSON translation checker with an EN/IT HTML workspace and an optional Python CLI. The downloadable kit is listed at EUR29 once. Start with the [free format-fit guide](resources/json-format-fit.md), [release checklist](resources/json-release-checklist.md) and [fictional interface demo](localization/README.md).
+[LocaleCheck 1.2](https://bellocchio2.gumroad.com/l/localecheck-json) brings JSON and ICU MessageFormat 1 checks onto your computer. Missing keys, blanks and argument mistakes before release or handoff; EN/IT workspace, up to 20 targets and reports. EUR29 one-time list price; taxes/currency at checkout. No subscription to run the delivered version, no promised future updates. It checks structure, not translation quality.
+
+[Try the free live demo](https://localecheck-demo.bellocchio23.chatgpt.site/) — one pair, 100 keys, 20 KiB per input, no signup. Read the [format-fit guide](resources/json-format-fit.md), [release checklist](resources/json-release-checklist.md) and [fictional interface demo](localization/README.md). The current product page is authoritative for supported formats and limits.
+
+**Which recurring localization task would you stop paying for if it worked locally?** [Add a concrete use case to the public feedback thread](https://github.com/bellocchio23m/PlayGround/issues/7): your format, workaround, time/cost and the result you would trust. A separate private preview is being evaluated; its extras are not included in the public kit yet.
 
 ## Repair a blocked web workflow
 
